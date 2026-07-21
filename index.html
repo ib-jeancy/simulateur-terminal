@@ -224,6 +224,7 @@ const state = {
   rebootRequested: false,
   sudoUntil: 0,
   umask: 0o022,
+  pendingShutdown: null,
   // Hooks fournis par l'interface (null en mode test Node)
   io: {
     write: null,       // (text, cls) => void  — écriture directe à l'écran
@@ -753,6 +754,7 @@ function resetAll(){
   state.exited = false;
   state.sudoUntil = 0;
   state.umask = 0o022;
+  state.pendingShutdown = null;
   state.bootTime = now();
   state.nextPid = 400;
   buildSystem();
@@ -1169,6 +1171,7 @@ function Flow(kind, code, n){ const e = new Error('flow'); e.flow = kind; e.code
 
 let positional = [];
 let funcDepth = 0;
+let loopDepth = 0;
 
 function paramValue(spec){
   if(spec === '?') return String(state.lastExit);
@@ -1466,6 +1469,7 @@ async function applyRedirs(redirs, ctx){
   const newCtx = {
     stdin,
     depth: ctx.depth,
+    job: ctx.job,
     out: (t) => {
       if(outToErr) return newCtx.err(t);
       if(outTarget){ if(!outTarget.devnull) outBuf.push(t); return; }
@@ -1523,6 +1527,7 @@ async function execNode(node, ctx){
         const sub = {
           stdin: data,
           depth: ctx.depth,
+          job: ctx.job,
           out: last ? ctx.out : (t)=>{ buf += t; },
           err: ctx.err
         };
@@ -1565,6 +1570,7 @@ async function execNode(node, ctx){
       const rd = await applyRedirs(node.redirs, ctx);
       if(rd.error){ ctx.err(rd.error + '\n'); return 1; }
       let code = 0, guard = 0;
+      loopDepth++;
       try{
         if(node.init.trim()) arith(node.init);
         for(;;){
@@ -1579,7 +1585,7 @@ async function execNode(node, ctx){
           if(node.step.trim()) arith(node.step);
           if(state.exited) break;
         }
-      } finally { await rd.finish(); }
+      } finally { loopDepth--; await rd.finish(); }
       return code;
     }
     case 'for': {
@@ -1589,6 +1595,7 @@ async function execNode(node, ctx){
       if(node.items === null) items = positional.slice();
       else for(const it of node.items) items.push(...await expandWord(it, ctx));
       let code = 0;
+      loopDepth++;
       try{
         for(const it of items){
           setVar(node.name, it);
@@ -1600,13 +1607,14 @@ async function execNode(node, ctx){
           }
           if(state.exited) break;
         }
-      } finally { await rd.finish(); }
+      } finally { loopDepth--; await rd.finish(); }
       return code;
     }
     case 'while': {
       const rd = await applyRedirs(node.redirs, ctx);
       if(rd.error){ ctx.err(rd.error + '\n'); return 1; }
       let code = 0, guard = 0;
+      loopDepth++;
       try{
         for(;;){
           if(++guard > 20000){ ctx.err('bash : boucle interrompue (limite de sécurité du simulateur)\n'); return 1; }
@@ -1621,7 +1629,7 @@ async function execNode(node, ctx){
           }
           if(state.exited) break;
         }
-      } finally { await rd.finish(); }
+      } finally { loopDepth--; await rd.finish(); }
       return code;
     }
     case 'func': {
@@ -1634,10 +1642,34 @@ async function execNode(node, ctx){
   return 0;
 }
 
+function describeNode(node){
+  if(!node) return 'commande';
+  switch(node.type){
+    case 'simple': {
+      const parts = [];
+      for(const a of node.assigns) parts.push(a.name + '=' + a.value.map(p => p.s).join(''));
+      for(const w of node.words) parts.push(w.map(p => p.s).join(''));
+      return parts.join(' ') || 'commande';
+    }
+    case 'pipeline': return node.cmds.map(describeNode).join(' | ');
+    case 'andor':    return describeNode(node.left) + ' ' + node.op + ' ' + describeNode(node.right);
+    case 'negate':   return '! ' + describeNode(node.child);
+    case 'seq':      return node.parts.map(p => describeNode(p.node)).join('; ');
+    case 'subshell': return '(' + describeNode(node.body) + ')';
+    case 'group':    return '{ ' + describeNode(node.body) + '; }';
+    case 'arithcmd': return '((' + node.expr + '))';
+    case 'if':       return 'if ...; fi';
+    case 'for': case 'cfor': return 'for ...; done';
+    case 'while':    return (node.until ? 'until' : 'while') + ' ...; done';
+    case 'func':     return node.name + '() { ...; }';
+  }
+  return 'commande';
+}
+
 async function runBackground(node, ctx){
   const pid = state.nextPid++;
   const jobId = state.jobs.length + 1;
-  const job = {id:jobId, pid, cmd:'commande en arrière-plan', status:'running', cancel:false};
+  const job = {id:jobId, pid, cmd:describeNode(node), status:'running', cancel:false};
   state.jobs.push(job);
   state.lastBgPid = pid;
   state.procs.push({pid, user:state.user, cmd:job.cmd, cpu:0.0, mem:0.1, stat:'S', tty:'pts/0', time:'00:00:00'});
@@ -1715,6 +1747,32 @@ function shellQuote(s){
   return "'" + s.replace(/'/g, `'\\''`) + "'";
 }
 
+/* Ubuntu 26.04 remplace les coreutils GNU par leur réécriture en Rust (uutils) */
+const COREUTILS_VERSION = 'uutils coreutils 0.4.0';
+const COREUTILS = ['ls','cp','mv','rm','cat','head','tail','wc','sort','uniq','cut','tr','du','df',
+  'chmod','chown','chgrp','ln','mkdir','rmdir','touch','stat','seq','basename','dirname','realpath',
+  'whoami','id','groups','uname','date','tee','sleep','env','printenv','uptime','nohup','tty'];
+const VERSIONS = {
+  'apt':'apt 3.0.4 (amd64)', 'apt-get':'apt 3.0.4 (amd64)', 'apt-cache':'apt 3.0.4 (amd64)',
+  'dnf':'4.21.1', 'yum':'4.21.1', 'pacman':'Pacman v6.1.0 - libalpm v14.0.0',
+  'grep':'grep (GNU grep) 3.11', 'sed':'sed (GNU sed) 4.9', 'awk':'GNU Awk 5.3.1',
+  'find':'find (GNU findutils) 4.10.0', 'xargs':'xargs (GNU findutils) 4.10.0',
+  'tar':'tar (GNU tar) 1.35', 'gzip':'gzip 1.13', 'gunzip':'gzip 1.13', 'zcat':'gzip 1.13',
+  'nano':'GNU nano, version 8.3', 'vim':'VIM - Vi IMproved 9.1', 'vi':'VIM - Vi IMproved 9.1',
+  'curl':'curl 8.14.1 (x86_64-pc-linux-gnu)', 'wget':'GNU Wget 1.25.0 built on linux-gnu.',
+  'bash':'GNU bash, version 5.3.0(1)-release (x86_64-pc-linux-gnu)',
+  'sh':'GNU bash, version 5.3.0(1)-release (x86_64-pc-linux-gnu)',
+  'systemctl':'systemd 258 (258.2-1ubuntu1)', 'journalctl':'systemd 258 (258.2-1ubuntu1)',
+  'service':'systemd 258 (258.2-1ubuntu1)',
+  'ip':'ip utility, iproute2-6.14.0', 'ifconfig':'net-tools 2.10', 'ping':'ping from iputils 20240905',
+  'ufw':'ufw 0.36.2', 'lsb_release':'lsb_release 12.1', 'diff':'diff (GNU diffutils) 3.10',
+  'less':'less 668 (GNU regular expressions)', 'more':'more from util-linux 2.40.2',
+  'crontab':'cronie 1.7.2', 'lsblk':'lsblk from util-linux 2.40.2', 'mount':'mount from util-linux 2.40.2',
+  'umount':'umount from util-linux 2.40.2', 'kill':'kill from util-linux 2.40.2',
+  'free':'free from procps-ng 4.0.5', 'ps':'ps from procps-ng 4.0.5', 'top':'top from procps-ng 4.0.5',
+  'pgrep':'pgrep from procps-ng 4.0.5', 'pkill':'pkill from procps-ng 4.0.5'
+};
+
 async function dispatch(argv, ctx){
   const name = argv[0];
   const args = argv.slice(1);
@@ -1725,12 +1783,13 @@ async function dispatch(argv, ctx){
     const savedPos = positional;
     positional = args;
     funcDepth++;
+    const savedLoop = loopDepth; loopDepth = 0;   /* une fonction ne rompt pas la boucle appelante */
     try{
       return await execNode(state.funcs[name], ctx);
     }catch(e){
       if(e && e.flow === 'return') return e.code;
       throw e;
-    }finally{ positional = savedPos; funcDepth--; }
+    }finally{ positional = savedPos; funcDepth--; loopDepth = savedLoop; }
   }
   /* script ou binaire par chemin */
   if(name.includes('/')){
@@ -1742,6 +1801,10 @@ async function dispatch(argv, ctx){
     if(!noHelp.includes(name) && (args.includes('--help') || (args.includes('-h') && ['ssh','apt','systemctl','git','docker'].includes(name)))){
       ctx.out((HELP[name] || (name + ' : pas d\'aide détaillée disponible.')) + '\n');
       return 0;
+    }
+    if(!noHelp.includes(name) && args.includes('--version')){
+      const v = VERSIONS[name] || (COREUTILS.includes(name) ? `${name} (${COREUTILS_VERSION})` : null);
+      if(v){ ctx.out(v + '\n'); return 0; }
     }
     return await fn(ctx, args);
   }
@@ -1762,6 +1825,7 @@ async function runScriptSource(src, args, ctx){
   const savedPos = positional;
   positional = args;
   funcDepth++;
+  const savedLoop = loopDepth; loopDepth = 0;
   try{
     const ast = parse(src);
     const code = await execNode(ast, {stdin:ctx.stdin, out:ctx.out, err:ctx.err, depth:(ctx.depth||0)+1});
@@ -1771,7 +1835,7 @@ async function runScriptSource(src, args, ctx){
     if(e && e.flow === 'return') return e.code;
     ctx.err('bash : ' + (e && e.message ? e.message : String(e)) + '\n');
     return 2;
-  }finally{ positional = savedPos; funcDepth--; }
+  }finally{ positional = savedPos; funcDepth--; loopDepth = savedLoop; }
 }
 
 /* =====================================================================
@@ -2291,23 +2355,53 @@ CMDS.du = async (ctx, args) => {
   return 0;
 };
 
-HELP.stat = "stat FICHIER — affiche les métadonnées détaillées d'un fichier.";
+HELP.stat = `stat [-c FORMAT] FICHIER... — affiche les métadonnées d'un fichier.
+  -c FORMAT   n'affiche que ce qui est demandé
+  Séquences : %n nom, %s taille, %a droits en octal, %A droits symboliques,
+              %U propriétaire, %G groupe, %u UID, %g GID, %i inode,
+              %F type, %y date de modification, %Y date en secondes
+Exemple : stat -c '%a %n' fichier.txt`;
 CMDS.stat = async (ctx, args) => {
-  if(!args.length) return usageErr(ctx, 'stat', 'opérande manquant');
-  for(const f of args){
-    const r = lookup(f, {noFollowLast:true});
-    if(r.err){ ctx.err(`stat: impossible d'évaluer '${f}': Aucun fichier ou dossier de ce type\n`); continue; }
+  const g = getopt(args, {known:'cfLt', value:'c', longs:['format','printf','terse','help','dereference']});
+  if(g.error) return usageErr(ctx, 'stat', g.error);
+  const fmt = g.opts.c || g.opts['--format'] || g.opts['--printf'];
+  const noNewline = !!g.opts['--printf'];
+  if(!g.rest.length) return usageErr(ctx, 'stat', 'opérande manquant');
+  let code = 0;
+  for(const f of g.rest){
+    const r = lookup(f, {noFollowLast: !(g.opts.L || g.opts['--dereference'])});
+    if(r.err){ ctx.err(`stat: impossible d'évaluer '${f}': Aucun fichier ou dossier de ce type\n`); code = 1; continue; }
     const n = r.node;
+    const typeLabel = n.type === 'dir' ? 'répertoire' : n.type === 'link' ? 'lien symbolique' : (nodeSize(n) === 0 ? 'fichier vide ordinaire' : 'fichier ordinaire');
+    if(fmt){
+      const out = String(fmt)
+        .replace(/%n/g, f)
+        .replace(/%s/g, String(nodeSize(n)))
+        .replace(/%a/g, (n.mode & 0o7777).toString(8))
+        .replace(/%A/g, modeString(n))
+        .replace(/%U/g, n.owner)
+        .replace(/%G/g, n.group)
+        .replace(/%u/g, String(USERS[n.owner] ? USERS[n.owner].uid : 1000))
+        .replace(/%g/g, String(gidOf(n.group)))
+        .replace(/%i/g, String(inodeOf(n)))
+        .replace(/%F/g, typeLabel)
+        .replace(/%Y/g, String(Math.floor(n.mtime.getTime() / 1000)))
+        .replace(/%y/g, n.mtime.toISOString().replace('T', ' ').slice(0, 19))
+        .replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+        .replace(/%%/g, '%');
+      ctx.out(out + (noNewline ? '' : '\n'));
+      continue;
+    }
     const oct = (n.mode & 0o7777).toString(8).padStart(4,'0');
     ctx.out(
 `  Fichier : ${f}
-    Taille : ${nodeSize(n)}\tBlocs : ${Math.ceil(nodeSize(n)/512)}\tBloc d'E/S : 4096\t${n.type === 'dir' ? 'répertoire' : n.type === 'link' ? 'lien symbolique' : 'fichier ordinaire'}
+    Taille : ${nodeSize(n)}\tBlocs : ${Math.ceil(nodeSize(n)/512)}\tBloc d'E/S : 4096\t${typeLabel}
 Périphérique : 803h/2051d\tInode : ${inodeOf(n)}\tLiens : 1
-     Accès : (${oct}/${modeString(n)})\tUID : ( ${USERS[n.owner] ? USERS[n.owner].uid : 1000}/${n.owner})\tGID : ( ${USERS[n.group] ? USERS[n.group].gid : 1000}/${n.group})
+     Accès : (${oct}/${modeString(n)})\tUID : ( ${USERS[n.owner] ? USERS[n.owner].uid : 1000}/${n.owner})\tGID : ( ${gidOf(n.group)}/${n.group})
 Modification : ${n.mtime.toISOString().replace('T',' ').slice(0,19)}
 `);
   }
-  return 0;
+  return code;
 };
 
 /* =====================================================================
@@ -2460,6 +2554,10 @@ Recherche récursive de fichiers.
   -user NOM       propriétaire
   -perm MODE      permissions exactes (ex. 644)
   -empty          fichiers ou dossiers vides
+  -mtime +N / -N  modifié il y a plus / moins de N jours
+  -mmin  +N / -N  modifié il y a plus / moins de N minutes
+  -newer FICHIER  plus récent que le fichier indiqué
+  -print0         résultats séparés par un octet nul (pour xargs -0)
   -delete         supprime les résultats
   -exec CMD {} \\; exécute une commande sur chaque résultat`;
 CMDS.find = async (ctx, args) => {
@@ -2484,6 +2582,26 @@ CMDS.find = async (ctx, args) => {
     else if(a === '-group'){ const u = args[++i]; tests.push(e => e.node.group === u); }
     else if(a === '-perm'){ const m = args[++i].replace(/^0/,''); tests.push(e => (e.node.mode & 0o777).toString(8) === m); }
     else if(a === '-empty') tests.push(e => e.node.type === 'dir' ? Object.keys(e.node.children).length === 0 : e.node.content === '');
+    else if(a === '-mtime' || a === '-mmin' || a === '-ctime' || a === '-atime'){
+      const spec = args[++i];
+      const unit = (a === '-mmin') ? 60000 : 86400000;
+      const mm = /^([+-]?)(\d+)$/.exec(spec || '');
+      if(!mm){ ctx.err(`find: argument non valable « ${spec} » pour « ${a} »\n`); return 1; }
+      const want = parseInt(mm[2], 10);
+      tests.push(e => {
+        const age = Math.floor((Date.now() - e.node.mtime.getTime()) / unit);
+        if(mm[1] === '+') return age > want;
+        if(mm[1] === '-') return age < want;
+        return age === want;
+      });
+    }
+    else if(a === '-newer' || a === '-anewer'){
+      const refPath = args[++i];
+      const ref = lookup(refPath);
+      if(ref.err){ ctx.err(`find: « ${refPath} » : Aucun fichier ou dossier de ce type\n`); return 1; }
+      tests.push(e => e.node.mtime > ref.node.mtime);
+    }
+    else if(a === '-print0') action = 'print0';
     else if(a === '-size'){
       const spec = args[++i];
       const m = /^([+-]?)(\d+)([ckMG]?)$/.exec(spec);
@@ -2532,6 +2650,10 @@ CMDS.find = async (ctx, args) => {
       const line = execCmd.map(c => c === '{}' ? shellQuote(e.path) : c).join(' ');
       await execNode(parse(line), ctx);
     }
+    return code;
+  }
+  if(action === 'print0'){
+    if(results.length) ctx.out(results.map(e => e.path).join('\0') + '\0');
     return code;
   }
   if(results.length) ctx.out(results.map(e=>e.path).join('\n') + '\n');
@@ -2999,27 +3121,65 @@ CMDS.cut = async (ctx, args) => {
   return inp.code;
 };
 
-HELP.xargs = "xargs [-n N] [-I REMPL] COMMANDE — construit des commandes à partir de l'entrée standard.";
+HELP.xargs = `xargs [OPTIONS] [COMMANDE [ARGUMENT]...]
+Construit des commandes à partir de l'entrée standard.
+  -n N        au plus N arguments par exécution
+  -I REMPL    remplace REMPL par chaque élément, une exécution par élément
+  -0          les éléments sont séparés par un octet nul (avec find -print0)
+  -d SÉP      séparateur personnalisé
+  -r          n'exécute rien si l'entrée est vide
+  -t          affiche la commande avant de l'exécuter
+Les options qui suivent le nom de la commande lui appartiennent :
+  find . -name "*.log" | xargs wc -l    (le -l est pour wc, pas pour xargs)`;
 CMDS.xargs = async (ctx, args) => {
-  const g = getopt(args, {known:'nI0dr', value:'nId'});
-  if(g.error) return usageErr(ctx, 'xargs', g.error);
-  const items = (ctx.stdin || '').split(/\s+/).filter(Boolean);
-  const cmd = g.rest.length ? g.rest : ['echo'];
+  /* xargs n'interprète que ses propres options : l'analyse s'arrête au premier
+     argument qui n'en est pas une, c'est-à-dire au nom de la commande appelée. */
+  let i = 0, nullSep = false, replace = null, maxArgs = null, delim = null;
+  let verbose = false, skipEmpty = false;
+  while(i < args.length){
+    const a = args[i];
+    if(a === '--'){ i++; break; }
+    if(a === '-' || a[0] !== '-') break;
+    if(a === '-0' || a === '--null'){ nullSep = true; i++; continue; }
+    if(a === '-r' || a === '--no-run-if-empty'){ skipEmpty = true; i++; continue; }
+    if(a === '-t' || a === '--verbose'){ verbose = true; i++; continue; }
+    if(a === '-I' || a === '-i' || a === '--replace'){ replace = args[i+1] || '{}'; i += 2; continue; }
+    if(a.startsWith('-I') && a.length > 2){ replace = a.slice(2); i++; continue; }
+    if(a === '-n' || a === '--max-args'){
+      if(args[i+1] === undefined) return usageErr(ctx, 'xargs', "l'option requiert un argument -- « n »");
+      maxArgs = parseInt(args[i+1], 10); i += 2; continue;
+    }
+    if(/^-n\d+$/.test(a)){ maxArgs = parseInt(a.slice(2), 10); i++; continue; }
+    if(a === '-d' || a === '--delimiter'){ delim = args[i+1]; i += 2; continue; }
+    if(a.startsWith('-d') && a.length > 2){ delim = a.slice(2); i++; continue; }
+    ctx.err(`xargs : option non valable -- « ${a.replace(/^-+/,'')} »\n`);
+    return 1;
+  }
+  const cmd = args.slice(i).length ? args.slice(i) : ['echo'];
+  const raw = ctx.stdin || '';
+  let items;
+  if(nullSep) items = raw.split('\0').filter(x => x !== '');
+  else if(delim) items = raw.split(delim === '\\n' ? '\n' : delim).filter(x => x !== '');
+  else items = raw.split(/\s+/).filter(Boolean);
+  if(!items.length && skipEmpty) return 0;
+
   let code = 0;
-  if(g.opts.I){
+  const run = async (line) => {
+    if(verbose) ctx.err(line + '\n');
+    return await execNode(parse(line), {stdin:'', out:ctx.out, err:ctx.err, depth:(ctx.depth||0)+1, job:ctx.job});
+  };
+  if(replace){
     for(const it of items){
-      const line = cmd.map(c => c.split(g.opts.I).join(it)).map(shellQuote).join(' ');
-      code = await execNode(parse(line), {stdin:'', out:ctx.out, err:ctx.err, depth:(ctx.depth||0)+1});
+      const line = cmd.map(c => c.split(replace).join(it)).map(shellQuote).join(' ');
+      code = await run(line);
     }
     return code;
   }
-  const n = g.opts.n ? parseInt(g.opts.n,10) : items.length || 1;
-  for(let i=0; i<items.length || i === 0; i += n){
-    const batch = items.slice(i, i+n);
-    if(!batch.length && i > 0) break;
-    const line = cmd.map(shellQuote).join(' ') + (batch.length ? ' ' + batch.map(shellQuote).join(' ') : '');
-    code = await execNode(parse(line), {stdin:'', out:ctx.out, err:ctx.err, depth:(ctx.depth||0)+1});
-    if(!items.length) break;
+  const n = maxArgs || items.length || 1;
+  if(!items.length) return await run(cmd.map(shellQuote).join(' '));
+  for(let k = 0; k < items.length; k += n){
+    const batch = items.slice(k, k + n);
+    code = await run(cmd.map(shellQuote).join(' ') + ' ' + batch.map(shellQuote).join(' '));
   }
   return code;
 };
@@ -3477,6 +3637,7 @@ CMDS.jobs = async (ctx, args) => {
     const mark = i === live.length-1 ? '+' : (i === live.length-2 ? '-' : ' ');
     const st = j.status === 'running' ? 'En cours d\'exécution' : j.status === 'stopped' ? 'Stoppé' : 'Terminé';
     ctx.out(`[${j.id}]${mark}  ${st}${args[0] === '-l' ? ' ' + j.pid : ''}      ${j.cmd} ${j.status === 'running' ? '&' : ''}\n`);
+    if(j.status !== 'running' && j.status !== 'stopped') j.status = 'reaped';
   });
   return 0;
 };
@@ -4829,6 +4990,10 @@ CMDS.docker = async (ctx, args) => {
     }
     case 'compose': {
       const act = args[1];
+      if(act === 'version' || act === '--version' || act === '-v'){
+        ctx.out('Docker Compose version v2.34.0\n');
+        return 0;
+      }
       if(!exists('docker-compose.yml') && !exists('compose.yml')){
         ctx.err('no configuration file provided: not found\n');
         return 1;
@@ -5155,7 +5320,15 @@ CMDS.sleep = async (ctx, args) => {
   if(!m){ ctx.err(`sleep: durée non valable : « ${spec} »\n`); return 1; }
   const mult = {s:1, m:60, h:3600, d:86400, '':1}[m[2]];
   const ms = Math.min(parseFloat(m[1]) * mult * 1000, 60000);
-  if(state.io.sleep) await state.io.sleep(ms);
+  if(!state.io.sleep) return 0;
+  /* attente fractionnée : « kill %1 » peut ainsi interrompre un sleep de fond */
+  let left = ms;
+  while(left > 0){
+    if(ctx.job && ctx.job.cancel) return 143;
+    const step = Math.min(120, left);
+    await state.io.sleep(step);
+    left -= step;
+  }
   return 0;
 };
 HELP.read = "read [-p INVITE] [VARIABLE] — lit une ligne depuis l'entrée et la stocke dans une variable.";
@@ -5419,10 +5592,22 @@ CMDS.return = async (ctx, args) => {
   throw Flow('return', args.length ? (parseInt(args[0],10)||0) : state.lastExit);
 };
 HELP.return = "return [CODE] — sort d'une fonction en renvoyant un code.";
-CMDS.break = async (ctx, args) => { throw Flow('break', 0, args.length ? parseInt(args[0],10) : 1); };
-HELP.break = "break [N] — sort d'une boucle.";
-CMDS.continue = async (ctx, args) => { throw Flow('continue', 0, args.length ? parseInt(args[0],10) : 1); };
-HELP.continue = "continue [N] — passe à l'itération suivante d'une boucle.";
+CMDS.break = async (ctx, args) => {
+  if(loopDepth === 0){
+    ctx.err("bash: break : « break » n'a de sens que dans une boucle for, while ou until\n");
+    return 1;
+  }
+  throw Flow('break', 0, args.length ? parseInt(args[0],10) : 1);
+};
+HELP.break = "break [N] — sort d'une boucle. Signale une erreur en dehors d'une boucle.";
+CMDS.continue = async (ctx, args) => {
+  if(loopDepth === 0){
+    ctx.err("bash: continue : « continue » n'a de sens que dans une boucle for, while ou until\n");
+    return 1;
+  }
+  throw Flow('continue', 0, args.length ? parseInt(args[0],10) : 1);
+};
+HELP.continue = "continue [N] — passe à l'itération suivante. Signale une erreur en dehors d'une boucle.";
 
 HELP.reset = "reset — réinitialise complètement le simulateur (fichiers, variables, paquets).";
 CMDS.reset = async (ctx, args) => {
@@ -5432,15 +5617,69 @@ CMDS.reset = async (ctx, args) => {
   return 0;
 };
 
-HELP.shutdown = "shutdown [now] — arrête le système (nécessite les droits root).\n  -r  redémarre au lieu d'arrêter\n  -c  annule un arrêt programmé";
+HELP.shutdown = `shutdown [OPTIONS] [HEURE] [MESSAGE]
+Arrête ou redémarre le système (réservé à root).
+  -h, -P  arrête le système (comportement par défaut)
+  -r      redémarre
+  -c      annule un arrêt programmé
+  -k      diffuse seulement l'avertissement, sans rien arrêter
+  HEURE   now, +MINUTES, ou HH:MM. Sans indication : +1 minute.
+Exemples :
+  sudo shutdown now
+  sudo shutdown -r +5 "Redémarrage de maintenance"
+  sudo shutdown -c`;
 CMDS.shutdown = async (ctx, args) => {
   if(state.user !== 'root'){
     ctx.err('Failed to set wall message, ignoring: Interactive authentication required.\nFailed to power off system via logind: Interactive authentication required.\nEssayez : sudo shutdown now\n');
     return 1;
   }
-  const reboot = args.includes('-r');
-  state.rebootRequested = reboot ? 'reboot' : 'poweroff';
-  if(state.io.power) await state.io.power(reboot ? 'reboot' : 'poweroff');
+  let kind = 'poweroff', cancel = false, warnOnly = false;
+  const rest = [];
+  for(const a of args){
+    if(a === '-c' || a === '--cancel'){ cancel = true; continue; }
+    if(a === '-r' || a === '--reboot'){ kind = 'reboot'; continue; }
+    if(a === '-h' || a === '-P' || a === '-H' || a === '--poweroff' || a === '--halt'){ kind = 'poweroff'; continue; }
+    if(a === '-k' || a === '--no-wall'){ warnOnly = true; continue; }
+    if(a.startsWith('-')){ ctx.err(`shutdown : option non valable -- « ${a.replace(/^-+/,'')} »\n`); return 1; }
+    rest.push(a);
+  }
+  if(cancel){
+    if(!state.pendingShutdown){
+      ctx.err('shutdown : aucun arrêt programmé à annuler\n');
+      return 1;
+    }
+    const p = state.pendingShutdown;
+    state.pendingShutdown = null;
+    ctx.out(`\nBroadcast message from root@${state.host}:\n\nL'arrêt programmé à ${p.when} a été annulé.\n\n`);
+    return 0;
+  }
+  const timeSpec = rest.length ? rest[0] : '+1';
+  const message = rest.slice(1).join(' ');
+  if(timeSpec !== 'now' && timeSpec !== '+0'){
+    let when;
+    const m = /^\+(\d+)$/.exec(timeSpec);
+    if(m){
+      const d = new Date(Date.now() + parseInt(m[1], 10) * 60000);
+      when = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+    } else if(/^\d{1,2}:\d{2}$/.test(timeSpec)){
+      when = timeSpec;
+    } else {
+      ctx.err(`shutdown : heure non valable : « ${timeSpec} »\n`);
+      return 1;
+    }
+    state.pendingShutdown = {when, kind, message};
+    ctx.out(`Arrêt ${kind === 'reboot' ? '(redémarrage) ' : ''}programmé à ${when}, utilisez « shutdown -c » pour l'annuler.\n`);
+    if(message) ctx.out(`\nBroadcast message from root@${state.host}:\n\n${message}\n\n`);
+    return 0;
+  }
+  if(warnOnly){
+    ctx.out(`\nBroadcast message from root@${state.host}:\n\n${message || 'The system is going down NOW!'}\n\n`);
+    ctx.out('(option -k : avertissement seul, le système reste allumé)\n');
+    return 0;
+  }
+  state.pendingShutdown = null;
+  state.rebootRequested = kind;
+  if(state.io.power) await state.io.power(kind);
   return 0;
 };
 CMDS.poweroff = async (ctx, args) => CMDS.shutdown(ctx, ['now']);
