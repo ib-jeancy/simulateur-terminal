@@ -404,6 +404,18 @@ function buildFS(){
   const D = (p,mode,o,g) => put(p, dnode(mode,o||'root',g||'root'));
   const F = (p,c,mode,o,g) => put(p, fnode(c,mode,o||'root',g||'root'));
 
+  /* Dates calculées par rapport à l'instant présent : le contenu des journaux
+     et l'horodatage des fichiers restent cohérents quelle que soit la date
+     à laquelle le lecteur ouvre le simulateur. */
+  const DAY = 86400000, HOUR = 3600000, MIN = 60000;
+  const back = (ms) => new Date(Date.now() - ms);
+  const ymd  = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const ENM  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const sysStamp = (ms) => { const d = back(ms); return `${ENM[d.getMonth()]} ${String(d.getDate()).padStart(2,' ')}`; };
+  const jourJournal = ymd(back(12*DAY));
+  const jourAncien  = ymd(back(198*DAY));
+  const jSys = sysStamp(14*HOUR);
+
   ['/bin','/sbin','/boot','/dev','/etc','/home','/lib','/media','/mnt','/opt','/proc','/root','/run','/srv','/sys','/tmp','/usr','/var'].forEach(p=>D(p));
   D('/root',0o700,'root','root');
   D('/tmp',0o1777,'root','root');
@@ -489,18 +501,18 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
   F('/etc/crontab','# m h dom mon dow user\tcommand\n17 *\t* * *\troot\tcd / && run-parts --report /etc/cron.hourly\n');
 
   F('/var/log/syslog',
-`Jul 21 08:00:01 simulateur-linux systemd[1]: Started Daily apt download activities.
-Jul 21 08:12:03 simulateur-linux sshd[712]: Server listening on 0.0.0.0 port 22.
-Jul 21 08:14:22 simulateur-linux kernel: [   12.884] EXT4-fs (sda1): mounted filesystem
-Jul 21 09:02:11 simulateur-linux cron[688]: (root) CMD (cd / && run-parts /etc/cron.hourly)
-Jul 21 09:45:00 simulateur-linux systemd[1]: Starting Cleanup of Temporary Directories...
-Jul 21 10:00:00 simulateur-linux systemd[1]: Finished Cleanup of Temporary Directories.
+`${jSys} 08:00:01 simulateur-linux systemd[1]: Started Daily apt download activities.
+${jSys} 08:12:03 simulateur-linux sshd[712]: Server listening on 0.0.0.0 port 22.
+${jSys} 08:14:22 simulateur-linux kernel: [   12.884] EXT4-fs (nvme0n1p2): mounted filesystem
+${jSys} 09:02:11 simulateur-linux cron[688]: (root) CMD (cd / && run-parts /etc/cron.hourly)
+${jSys} 09:45:00 simulateur-linux systemd[1]: Starting Cleanup of Temporary Directories...
+${jSys} 10:00:00 simulateur-linux systemd[1]: Finished Cleanup of Temporary Directories.
 `);
   F('/var/log/auth.log',
-`Jul 21 08:12:03 simulateur-linux sshd[712]: Accepted password for user from 192.168.1.42 port 51234 ssh2
-Jul 21 08:30:11 simulateur-linux sudo:     user : TTY=pts/0 ; PWD=/home/user ; USER=root ; COMMAND=/usr/bin/apt update
-Jul 21 09:14:55 simulateur-linux sshd[801]: Failed password for invalid user admin from 203.0.113.9 port 40122 ssh2
-Jul 21 09:14:58 simulateur-linux sshd[801]: Failed password for invalid user admin from 203.0.113.9 port 40122 ssh2
+`${jSys} 08:12:03 simulateur-linux sshd[712]: Accepted password for user from 192.168.1.42 port 51234 ssh2
+${jSys} 08:30:11 simulateur-linux sudo:     user : TTY=pts/0 ; PWD=/home/user ; USER=root ; COMMAND=/usr/bin/apt update
+${jSys} 09:14:55 simulateur-linux sshd[801]: Failed password for invalid user admin from 203.0.113.9 port 40122 ssh2
+${jSys} 09:14:58 simulateur-linux sshd[801]: Failed password for invalid user admin from 203.0.113.9 port 40122 ssh2
 `);
   F('/var/www/html/index.html','<!doctype html>\n<html><body><h1>Ça marche !</h1></body></html>\n',0o644,'www-data','www-data');
 
@@ -584,15 +596,15 @@ echo "Vous êtes dans : $(pwd)"
 6. find . -name "*.log"
 `);
   U('exercices/03-recherche/journal.log',
-`2026-07-10 08:12:01 INFO  démarrage du service
-2026-07-10 08:12:03 INFO  connexion à la base de données
-2026-07-10 08:14:22 ERROR délai dépassé sur la requête
-2026-07-10 08:14:23 INFO  nouvelle tentative
-2026-07-10 08:14:25 INFO  connexion rétablie
-2026-07-10 09:02:11 WARN  utilisation mémoire élevée
-2026-07-10 09:45:00 ERROR échec d'écriture disque
-2026-07-10 09:45:02 ERROR volume /dev/sda1 saturé
-2026-07-10 10:00:00 INFO  sauvegarde effectuée
+`${jourJournal} 08:12:01 INFO  démarrage du service
+${jourJournal} 08:12:03 INFO  connexion à la base de données
+${jourJournal} 08:14:22 ERROR délai dépassé sur la requête
+${jourJournal} 08:14:23 INFO  nouvelle tentative
+${jourJournal} 08:14:25 INFO  connexion rétablie
+${jourJournal} 09:02:11 WARN  utilisation mémoire élevée
+${jourJournal} 09:45:00 ERROR échec d'écriture disque
+${jourJournal} 09:45:02 ERROR volume /dev/nvme0n1p2 saturé
+${jourJournal} 10:00:00 INFO  sauvegarde effectuée
 `);
   U('exercices/03-recherche/ventes.csv',
 `region;produit;quantite;montant
@@ -604,7 +616,11 @@ Nord;compresseur;2;8400
 Sud;vanne;40;2800
 `);
   UD('exercices/03-recherche/archives');
-  U('exercices/03-recherche/archives/ancien.log','2026-01-05 12:00:00 INFO  ancienne entrée\n');
+  U('exercices/03-recherche/archives/ancien.log',
+`${jourAncien} 12:00:00 INFO  ancienne entrée, conservée pour archive
+${jourAncien} 12:04:31 WARN  espace disque faible sur /var
+${jourAncien} 12:09:02 ERROR sauvegarde interrompue
+`);
 
   UD('exercices/04-scripts');
   U('exercices/04-scripts/consignes.txt',
@@ -642,6 +658,40 @@ echo "Terminé, code de retour : $?"
   UD('projets');
   UD('.ssh',0o700);
   U('.ssh/known_hosts','',0o600);
+
+  /* Horodatages : sans cela tous les fichiers naissent à l'instant du démarrage
+     et « find -mtime », « ls -lt » ou « find -newer » n'ont plus rien à trier. */
+  const stampAll = (node, d) => {
+    node.mtime = d;
+    if(node.type === 'dir') for(const k of Object.keys(node.children)) stampAll(node.children[k], d);
+  };
+  const stamp = (path, d, deep) => {
+    const seg = path.split('/').filter(Boolean);
+    let cur = r;
+    for(const s of seg){
+      if(!cur.children || !cur.children[s]) return;
+      cur = cur.children[s];
+    }
+    if(deep) stampAll(cur, d); else cur.mtime = d;
+  };
+  stampAll(r, back(97*DAY));                                   /* installation du système */
+  stamp('/etc/resolv.conf',  back(6*HOUR));
+  stamp('/var/log',          back(40*MIN), true);
+  stamp('/var/log/syslog',   back(12*MIN));
+  stamp('/var/log/auth.log', back(40*MIN));
+  stamp('/var/www',          back(40*DAY), true);
+  stamp('/tmp',              back(2*HOUR));
+  stamp('/home/user',                                   back(2*HOUR));
+  stamp('/home/user/README.txt',                        back(9*DAY));
+  stamp('/home/user/.bash_history',                     back(35*MIN));
+  stamp('/home/user/projets',                           back(9*DAY));
+  stamp('/home/user/.ssh',                              back(60*DAY), true);
+  stamp('/home/user/exercices',                         back(9*DAY), true);
+  stamp('/home/user/exercices/03-recherche/journal.log', back(12*DAY));
+  stamp('/home/user/exercices/03-recherche/ventes.csv',  back(21*DAY));
+  stamp('/home/user/exercices/03-recherche/archives',    back(190*DAY), true);
+  stamp('/home/user/exercices/03-recherche/archives/ancien.log', back(198*DAY));
+  stamp('/home/user/exercices/04-scripts/sauvegarde.sh', back(30*DAY));
 
   return r;
 }
@@ -2096,12 +2146,75 @@ CMDS.rmdir = async (ctx, args) => {
 };
 
 /* ---------------- touch ---------------- */
-HELP.touch = "touch FICHIER... — crée les fichiers absents, met à jour l'horodatage des existants.\n  -c  ne crée aucun fichier\n  -d  date à appliquer (ex. -d '2020-01-01')";
+function parseWhen(spec){
+  if(spec == null) return null;
+  const raw = String(spec).trim();
+  const s = raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const t0 = Date.now();
+  if(s === 'now' || s === 'maintenant' || s === 'today' || s === "aujourd'hui") return new Date(t0);
+  if(s === 'yesterday' || s === 'hier') return new Date(t0 - 86400000);
+  if(s === 'tomorrow' || s === 'demain') return new Date(t0 + 86400000);
+  const UNITS = {
+    second:1000, seconde:1000, secondes:1000, sec:1000,
+    minute:60000, minutes:60000, min:60000,
+    hour:3600000, hours:3600000, heure:3600000, heures:3600000,
+    day:86400000, days:86400000, jour:86400000, jours:86400000,
+    week:604800000, weeks:604800000, semaine:604800000, semaines:604800000,
+    month:2592000000, months:2592000000, mois:2592000000,
+    year:31536000000, years:31536000000, an:31536000000, ans:31536000000, annee:31536000000
+  };
+  const m = /^([+-]?)(\d+)\s*([a-z]+?)s?\s*(ago|avant)?$/.exec(s);
+  if(m){
+    const unit = UNITS[m[3]] || UNITS[m[3] + 's'];
+    if(unit){
+      const past = !!m[4] || m[1] === '-';
+      const delta = parseInt(m[2], 10) * unit;
+      return new Date(t0 + (past ? -delta : delta));
+    }
+  }
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+HELP.touch = `touch [OPTIONS] FICHIER...
+Crée les fichiers absents et met à jour l'horodatage des existants.
+  -c            ne crée aucun fichier
+  -d DATE       applique une date : '2020-01-01', 'yesterday',
+                '10 days ago', '2 hours ago', '+3 days'
+  -t HORODATAGE format [[CC]AA]MMJJhhmm[.ss]
+  -r FICHIER    reprend la date d'un autre fichier
+  -a / -m       agit sur la date d'accès / de modification`;
 CMDS.touch = async (ctx, args) => {
-  const g = getopt(args, {known:'cad', value:'d'});
+  const g = getopt(args, {known:'camdrt', value:'drt', longs:['date','reference','no-create','help']});
   if(g.error) return usageErr(ctx, 'touch', g.error);
   if(!g.rest.length) return usageErr(ctx, 'touch', 'opérande fichier manquant');
-  const when = g.opts.d ? new Date(g.opts.d) : now();
+  let when = now();
+  const dspec = g.opts.d != null ? g.opts.d : g.opts['--date'];
+  if(dspec != null && dspec !== true){
+    const parsed = parseWhen(dspec);
+    if(!parsed){ ctx.err(`touch: format de date non valable « ${dspec} »\n`); return 1; }
+    when = parsed;
+  }
+  if(g.opts.t != null && g.opts.t !== true){
+    const parts = String(g.opts.t).split('.');
+    const digits = parts[0];
+    const ss = parts[1] ? parseInt(parts[1], 10) : 0;
+    let year, rest;
+    if(digits.length === 12){ year = parseInt(digits.slice(0,4),10); rest = digits.slice(4); }
+    else if(digits.length === 10){ const yy = parseInt(digits.slice(0,2),10); year = yy < 69 ? 2000+yy : 1900+yy; rest = digits.slice(2); }
+    else if(digits.length === 8){ year = now().getFullYear(); rest = digits; }
+    else { ctx.err(`touch: horodatage non valable « ${g.opts.t} »\n`); return 1; }
+    when = new Date(year, parseInt(rest.slice(0,2),10)-1, parseInt(rest.slice(2,4),10),
+                    parseInt(rest.slice(4,6),10), parseInt(rest.slice(6,8),10), ss);
+    if(isNaN(when.getTime())){ ctx.err(`touch: horodatage non valable « ${g.opts.t} »\n`); return 1; }
+  }
+  const rspec = g.opts.r != null ? g.opts.r : g.opts['--reference'];
+  if(rspec != null && rspec !== true){
+    const ref = lookup(rspec);
+    if(ref.err){ ctx.err(`touch: impossible d'évaluer '${rspec}': Aucun fichier ou dossier de ce type\n`); return 1; }
+    when = new Date(ref.node.mtime.getTime());
+  }
+  const noCreate = g.opts.c || g.opts['--no-create'];
   let code = 0;
   for(const t of g.rest){
     const r = lookup(t);
@@ -2109,15 +2222,15 @@ CMDS.touch = async (ctx, args) => {
       if(!canWrite(r.node) && r.node.owner !== state.user && state.user !== 'root'){
         ctx.err(`touch: impossible de faire un touch sur '${t}': Permission non accordée\n`); code = 1; continue;
       }
-      r.node.mtime = isNaN(when) ? now() : when;
+      r.node.mtime = new Date(when.getTime());
       continue;
     }
-    if(g.opts.c) continue;
+    if(noCreate) continue;
     const par = lookup(dirnameOf(t));
     if(par.err || par.node.type !== 'dir'){ ctx.err(`touch: impossible de faire un touch sur '${t}': Aucun fichier ou dossier de ce type\n`); code = 1; continue; }
     if(!canWrite(par.node)){ ctx.err(`touch: impossible de faire un touch sur '${t}': Permission non accordée\n`); code = 1; continue; }
     const n = fnode('', 0o666 & ~(state.umask || 0), state.user, state.user);
-    n.mtime = isNaN(when) ? now() : when;
+    n.mtime = new Date(when.getTime());
     par.node.children[basenameOf(t)] = n;
   }
   return code;
@@ -2307,7 +2420,7 @@ CMDS.file = async (ctx, args) => {
     let d;
     if(c === '') d = 'empty';
     else if(c.startsWith('#!')) d = c.split('\n')[0].replace('#!','') + ' script, ASCII text executable';
-    else if(f.endsWith('.gz') || n.gz) d = 'gzip compressed data';
+    else if(isGzipped(c) || n.gz) d = 'gzip compressed data';
     else if(n.tar || f.endsWith('.tar')) d = 'POSIX tar archive';
     else if(f.endsWith('.csv')) d = 'CSV text';
     else if(f.endsWith('.html')) d = 'HTML document, ASCII text';
@@ -3248,9 +3361,11 @@ CMDS.tar = async (ctx, args) => {
   }
   const rf = readFile(archive);
   if(rf.err){ ctx.err(`tar: ${archive}: Impossible d'ouvrir: Aucun fichier ou dossier de ce type\ntar: Erreur fatale, arrêt immédiat\n`); return 2; }
-  if(!rf.content.startsWith('TARSIM1')){ ctx.err(`tar: Ceci ne ressemble pas à une archive tar\n`); return 2; }
+  let arch = rf.content;
+  if(isGzipped(arch)) arch = arch.slice(GZ_MAGIC.length);
+  if(!arch.startsWith('TARSIM1')){ ctx.err(`tar: Ceci ne ressemble pas à une archive tar\n`); return 2; }
   let entries;
-  try{ entries = JSON.parse(rf.content.slice(8)); }catch(e){ ctx.err('tar: archive corrompue\n'); return 2; }
+  try{ entries = JSON.parse(arch.slice(8)); }catch(e){ ctx.err('tar: archive corrompue\n'); return 2; }
   if(o.t){ ctx.out(entries.map(e=>e.p).join('\n') + '\n'); return 0; }
   if(o.x){
     const base = o.C ? absPath(o.C) : state.cwd;
@@ -3270,45 +3385,105 @@ CMDS.tar = async (ctx, args) => {
   return usageErr(ctx, 'tar', 'vous devez indiquer une des options -c, -x ou -t');
 };
 
-HELP.gzip = "gzip FICHIER — compresse un fichier (ajoute .gz).\n  -d  décompresse (équivaut à gunzip)\n  -l  affiche le taux de compression";
+/* Marqueur de compression : sans lui, rien ne distingue un fichier réellement
+   compressé d'un fichier ordinaire simplement renommé en .gz */
+const GZ_MAGIC = '\u001f\u008b\u0008\u0000SIMGZ\n';
+function isGzipped(s){ return typeof s === 'string' && s.startsWith(GZ_MAGIC); }
+
+HELP.gzip = `gzip [OPTIONS] FICHIER... — compresse des fichiers (suffixe .gz).
+  -d  décompresse (équivalent de gunzip)
+  -c  écrit sur la sortie standard sans modifier le fichier d'origine
+  -k  conserve le fichier d'origine
+  -l  affiche le taux de compression
+  -f  force l'opération
+  -v  mode détaillé`;
 CMDS.gzip = async (ctx, args) => {
-  const g = getopt(args, {known:'dklrvf9'});
+  const g = getopt(args, {known:'dcklrvfn123456789', longs:['decompress','stdout','keep','list','verbose','force','help']});
   if(g.error) return usageErr(ctx, 'gzip', g.error);
+  const o = g.opts;
+  const dec = o.d || o['--decompress'];
+  const toStdout = o.c || o['--stdout'];
+  const keep = o.k || o['--keep'];
   if(!g.rest.length) return usageErr(ctx, 'gzip', 'opérande manquant');
   let code = 0;
   for(const f of g.rest){
     const r = lookup(f);
     if(r.err){ ctx.err(`gzip: ${f}: Aucun fichier ou dossier de ce type\n`); code = 1; continue; }
-    if(g.opts.d){
+    if(r.node.type === 'dir'){ ctx.err(`gzip: ${f} est un dossier -- ignoré\n`); code = 1; continue; }
+    if(!canRead(r.node)){ ctx.err(`gzip: ${f}: Permission non accordée\n`); code = 1; continue; }
+    const content = r.node.content;
+
+    if(o.l || o['--list']){
+      if(!isGzipped(content)){ ctx.err(`gzip: ${f}: format gzip non reconnu\n`); code = 1; continue; }
+      const clair = Math.max(1, bytelen(content.slice(GZ_MAGIC.length)));
+      const comp = Math.max(1, Math.round(clair * 0.38));
+      ctx.out(`         compressed        uncompressed  ratio uncompressed_name\n${String(comp).padStart(19)} ${String(clair).padStart(19)} ${(100 - comp / clair * 100).toFixed(1)}% ${f.replace(/\.gz$/,'')}\n`);
+      continue;
+    }
+
+    if(dec){
+      if(!isGzipped(content)){ ctx.err(`gzip: ${f}: format gzip non reconnu\n`); code = 1; continue; }
+      const plain = content.slice(GZ_MAGIC.length);
+      if(toStdout){ ctx.out(plain); continue; }
       if(!f.endsWith('.gz')){ ctx.err(`gzip: ${f}: suffixe inconnu -- ignoré\n`); code = 1; continue; }
       const par = lookup(dirnameOf(f));
       const newName = basenameOf(f).replace(/\.gz$/,'');
-      delete r.node.gz;
-      par.node.children[newName] = r.node;
-      delete par.node.children[basenameOf(f)];
-      if(g.opts.v) ctx.out(`${f}:\t décompressé vers ${newName}\n`);
+      if(keep){
+        /* -k : le fichier décompressé est un nouveau fichier, pas le même nœud */
+        const copie = fnode(plain, r.node.mode, r.node.owner, r.node.group);
+        copie.mtime = r.node.mtime;
+        par.node.children[newName] = copie;
+      } else {
+        r.node.content = plain;
+        delete r.node.gz;
+        par.node.children[newName] = r.node;
+        delete par.node.children[basenameOf(f)];
+      }
+      if(o.v) ctx.out(`${f}:\t décompressé vers ${newName}\n`);
       continue;
     }
+
+    if(isGzipped(content) && !o.f && !o['--force']){ ctx.err(`gzip: ${f} est déjà compressé -- ignoré\n`); code = 1; continue; }
+    const packed = GZ_MAGIC + content;
+    if(toStdout){ ctx.out(packed); continue; }
     if(f.endsWith('.gz')){ ctx.err(`gzip: ${f} porte déjà le suffixe .gz -- ignoré\n`); code = 1; continue; }
     const par = lookup(dirnameOf(f));
-    r.node.gz = true;
-    par.node.children[basenameOf(f) + '.gz'] = r.node;
-    delete par.node.children[basenameOf(f)];
-    if(g.opts.v) ctx.out(`${f}:\t 62.3% -- remplacé par ${f}.gz\n`);
+    if(!canWrite(par.node)){ ctx.err(`gzip: ${f}: Permission non accordée\n`); code = 1; continue; }
+    if(keep){
+      /* -k : l'archive est un nouveau fichier, l'original reste intact */
+      const archive = fnode(packed, r.node.mode, r.node.owner, r.node.group);
+      archive.gz = true;
+      par.node.children[basenameOf(f) + '.gz'] = archive;
+    } else {
+      r.node.content = packed;
+      r.node.gz = true;
+      par.node.children[basenameOf(f) + '.gz'] = r.node;
+      delete par.node.children[basenameOf(f)];
+    }
+    if(o.v) ctx.out(`${f}:\t 62.3% -- remplacé par ${f}.gz\n`);
   }
   return code;
 };
 CMDS.gunzip = async (ctx, args) => CMDS.gzip(ctx, ['-d'].concat(args));
-HELP.gunzip = "gunzip FICHIER.gz — décompresse un fichier.";
+HELP.gunzip = "gunzip FICHIER.gz — décompresse un fichier compressé par gzip.";
+
+HELP.zcat = "zcat FICHIER.gz — affiche le contenu d'un fichier compressé sans le décompresser sur le disque.";
 CMDS.zcat = async (ctx, args) => {
-  for(const f of args){
+  const g = getopt(args, {known:'fv', longs:['help']});
+  if(g.error) return usageErr(ctx, 'zcat', g.error);
+  if(!g.rest.length) return usageErr(ctx, 'zcat', 'opérande manquant');
+  let code = 0;
+  for(const f of g.rest){
     const r = readFile(f);
-    if(r.err){ ctx.err(`zcat: ${f}: Aucun fichier ou dossier de ce type\n`); return 1; }
-    ctx.out(r.content);
+    if(r.err){ ctx.err(`zcat: ${f}: Aucun fichier ou dossier de ce type\n`); code = 1; continue; }
+    if(!isGzipped(r.content)){
+      ctx.err(`gzip: ${f}: format gzip non reconnu\n`);
+      code = 1; continue;
+    }
+    ctx.out(r.content.slice(GZ_MAGIC.length));
   }
-  return 0;
+  return code;
 };
-HELP.zcat = "zcat FICHIER.gz — affiche le contenu d'un fichier compressé.";
 
 /* =====================================================================
    Partie 7 : identité, permissions, processus, matériel
@@ -3538,7 +3713,30 @@ CMDS.date = async (ctx, args) => {
   ctx.out(d.toString().replace(/GMT.*$/,'CEST ' + d.getFullYear()) + '\n');
   return 0;
 };
-CMDS.cal = async (ctx) => { const d = now(); ctx.out(`    ${MONTHS[d.getMonth()]} ${d.getFullYear()}\nlu ma me je ve sa di\n(affichage simplifié)\n`); return 0; };
+HELP.cal = "cal [MOIS [ANNÉE]] — affiche le calendrier d'un mois.\n  Sans argument, affiche le mois en cours. Exemple : cal 12 2026";
+CMDS.cal = async (ctx, args) => {
+  const g = getopt(args, {known:'my13', longs:['help']});
+  if(g.error) return usageErr(ctx, 'cal', g.error);
+  const today = now();
+  let month = today.getMonth(), year = today.getFullYear();
+  const nums = g.rest.filter(a => /^\d+$/.test(a)).map(Number);
+  if(nums.length === 1) year = nums[0];
+  else if(nums.length >= 2){ month = nums[0] - 1; year = nums[1]; }
+  if(month < 0 || month > 11){ ctx.err('cal: mois non valable\n'); return 1; }
+  const MOIS = ['janvier','février','mars','avril','mai','juin','juillet','août','septembre','octobre','novembre','décembre'];
+  const nbJours = new Date(year, month + 1, 0).getDate();
+  const debut = (new Date(year, month, 1).getDay() + 6) % 7;   /* lundi = 0 */
+  const titre = `${MOIS[month]} ${year}`;
+  ctx.out(' '.repeat(Math.max(0, Math.floor((20 - titre.length) / 2))) + titre + '\n');
+  ctx.out('lu ma me je ve sa di\n');
+  let ligne = '   '.repeat(debut);
+  for(let j = 1; j <= nbJours; j++){
+    ligne += String(j).padStart(2, ' ') + ' ';
+    if((debut + j) % 7 === 0){ ctx.out(ligne.replace(/\s+$/,'') + '\n'); ligne = ''; }
+  }
+  if(ligne.trim()) ctx.out(ligne.replace(/\s+$/,'') + '\n');
+  return 0;
+};
 
 HELP.ps = "ps [aux] [-ef] — affiche les processus.\n  aux  tous les processus, format détaillé\n  -ef  tous les processus, format complet";
 CMDS.ps = async (ctx, args) => {
@@ -4889,6 +5087,12 @@ CMDS.docker = async (ctx, args) => {
     ctx.out('Docker version 20.10.24+dfsg1, build 297e128\n');
     return 0;
   }
+  /* « docker compose version » n'a pas besoin du démon Docker */
+  if(sub === 'compose' && (args[1] === 'version' || args[1] === '--version' || args[1] === '-v')){
+    if(!d.installed){ ctx.err('docker : commande introuvable\nInstallez-le avec : sudo apt install docker.io\n'); return 127; }
+    ctx.out('Docker Compose version v2.34.0\n');
+    return 0;
+  }
   if(!dockerReady(ctx)) return 127;
   const rnd = () => Math.random().toString(16).slice(2,14);
   switch(sub){
@@ -5256,6 +5460,7 @@ CMDS.true = async () => 0;
 CMDS.false = async () => 1;
 HELP.true = "true — ne fait rien et renvoie le code 0.";
 HELP.false = "false — ne fait rien et renvoie le code 1.";
+HELP[':'] = ": — primitive du shell qui ne fait rien et renvoie 0.\n  Utile comme instruction vide : while :; do ... done";
 CMDS[':'] = async () => 0;
 
 HELP.expr = "expr EXPRESSION — évalue une expression arithmétique (ex. expr 3 + 4).";
@@ -6166,10 +6371,11 @@ function decode(v){
   return v;
 }
 let saveTimer = null;
-function saveState(){
+function writeStateNow(){
   if(!storageOK) return;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
+  saveTimer = null;
+  {
     try{
       const s = SIM.state;
       localStorage.setItem(STORE_KEY, JSON.stringify(encode({
@@ -6179,7 +6385,14 @@ function saveState(){
         net:s.net, cron:s.cron, gitRepos:s.gitRepos
       })));
     }catch(e){ storageOK = false; }
-  }, 400);
+  }
+}
+/* Écriture différée pendant l'usage normal, mais immédiate avant toute fermeture :
+   sans cela, une modification faite dans les 400 dernières millisecondes serait perdue. */
+function saveState(){
+  if(!storageOK) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(writeStateNow, 400);
 }
 function loadState(){
   if(!storageOK) return false;
@@ -6417,7 +6630,11 @@ try{
 const restored = loadState();
 boot();
 if(restored) write('(session précédente restaurée — « reset » pour repartir de zéro)\n\n', 'dim');
-window.addEventListener('beforeunload', saveState);
+window.addEventListener('beforeunload', writeStateNow);
+window.addEventListener('pagehide', writeStateNow);
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'hidden') writeStateNow();
+});
 
 })();
 
