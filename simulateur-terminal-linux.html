@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulateur de terminal Linux</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Newsreader:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0e0f;
+    --bg-raised:#111516;
+    --amber:#ffb000;
+    --amber-dim:#8a6000;
+    --amber-soft:#ffcf66;
+    --text:#e8e6df;
+    --muted:#5f6b6b;
+    --error:#ff5f56;
+    --ok:#7ee787;
+    --glow: 0 0 6px rgba(255,176,0,0.35);
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:var(--bg);
+    font-family:'JetBrains Mono', monospace;
+    color:var(--text);
+    overflow:hidden;
+  }
+  #frame{
+    position:relative;
+    height:100vh;
+    display:flex;
+    flex-direction:column;
+  }
+  /* --- Title bar --- */
+  #titlebar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:10px 16px;
+    background:var(--bg-raised);
+    border-bottom:1px solid rgba(255,176,0,0.15);
+    font-size:12.5px;
+    letter-spacing:0.02em;
+    color:var(--muted);
+    flex-shrink:0;
+    z-index:5;
+  }
+  #titlebar .path{
+    color:var(--amber-soft);
+  }
+  #titlebar button{
+    background:none;
+    border:1px solid var(--amber-dim);
+    color:var(--amber-soft);
+    font-family:inherit;
+    font-size:11.5px;
+    padding:5px 10px;
+    border-radius:3px;
+    cursor:pointer;
+    transition:background .15s ease, color .15s ease;
+  }
+  #titlebar button:hover{ background:var(--amber-dim); color:#0b0e0f; }
+
+  /* --- Terminal surface --- */
+  #screen-wrap{
+    position:relative;
+    flex:1;
+    overflow:hidden;
+  }
+  #screen{
+    position:absolute; inset:0;
+    padding:22px 26px 90px 26px;
+    overflow-y:auto;
+    font-size:14.5px;
+    line-height:1.55;
+    scrollbar-width:thin;
+    scrollbar-color:var(--amber-dim) transparent;
+  }
+  #screen::-webkit-scrollbar{ width:8px; }
+  #screen::-webkit-scrollbar-thumb{ background:var(--amber-dim); border-radius:4px; }
+
+  .line{ white-space:pre-wrap; word-break:break-word; }
+  .line.cmd{ color:var(--amber-soft); }
+  .line.out{ color:var(--text); }
+  .line.err{ color:var(--error); }
+  .line.ok{ color:var(--ok); }
+  .line.dim{ color:var(--muted); }
+  .prompt-user{ color:var(--amber); font-weight:700; }
+  .prompt-path{ color:var(--amber-soft); }
+  .prompt-sym{ color:var(--muted); }
+
+  #inputline{ display:flex; align-items:baseline; }
+  #inputline .prefix{ white-space:pre; flex-shrink:0; }
+  #cmdinput{
+    flex:1;
+    background:transparent;
+    border:none;
+    outline:none;
+    color:var(--text);
+    font-family:inherit;
+    font-size:14.5px;
+    caret-color:var(--amber);
+  }
+
+  /* CRT effects */
+  #scanlines{
+    position:absolute; inset:0;
+    pointer-events:none;
+    background:repeating-linear-gradient(
+      to bottom,
+      rgba(255,176,0,0.035) 0px,
+      rgba(255,176,0,0.035) 1px,
+      transparent 2px,
+      transparent 3px
+    );
+    mix-blend-mode:overlay;
+    z-index:3;
+  }
+  #vignette{
+    position:absolute; inset:0;
+    pointer-events:none;
+    box-shadow: inset 0 0 140px rgba(0,0,0,0.65);
+    z-index:4;
+  }
+  #screen, .line, #cmdinput{ text-shadow: 0 0 1px rgba(255,176,0,0.15); }
+
+  @media (prefers-reduced-motion:no-preference){
+    #frame{ animation:flicker 6s infinite; }
+  }
+  @keyframes flicker{
+    0%,96%,100%{ opacity:1; }
+    97%{ opacity:0.985; }
+    98%{ opacity:1; }
+  }
+
+  /* --- nano editor overlay --- */
+  #editor{
+    position:absolute; inset:0;
+    background:var(--bg);
+    display:none;
+    flex-direction:column;
+    z-index:15;
+  }
+  #editor.show{ display:flex; }
+  #editor-bar{
+    background:var(--amber);
+    color:#0b0e0f;
+    font-weight:700;
+    font-size:12.5px;
+    padding:6px 14px;
+  }
+  #editor textarea{
+    flex:1;
+    background:var(--bg);
+    color:var(--text);
+    border:none;
+    outline:none;
+    resize:none;
+    font-family:inherit;
+    font-size:14px;
+    line-height:1.5;
+    padding:16px 20px;
+  }
+  #editor-help{
+    background:var(--bg-raised);
+    color:var(--muted);
+    font-size:12px;
+    padding:8px 14px;
+    border-top:1px solid var(--amber-dim);
+  }
+  #editor-help b{ color:var(--amber-soft); }
+</style>
+</head>
+<body>
+
+<div id="frame">
+  <div id="titlebar">
+    <div>simulateur@linux: <span class="path" id="tb-path">~</span></div>
+  </div>
+
+  <div id="screen-wrap">
+    <div id="scanlines"></div>
+    <div id="vignette"></div>
+    <div id="screen"></div>
+  </div>
+
+  <div id="editor">
+    <div id="editor-bar">nano</div>
+    <textarea id="editor-text" spellcheck="false"></textarea>
+    <div id="editor-help"><b>Ctrl+S</b> enregistrer &nbsp; <b>Ctrl+X</b> enregistrer et quitter &nbsp; <b>Échap</b> quitter sans enregistrer</div>
+  </div>
+</div>
+
+<script>
+(function(){
+
+/* ============================================================
+   SYSTÈME DE FICHIERS VIRTUEL
+   ============================================================ */
+function dirNode(children){ return {type:'dir', children: children || {}}; }
+function fileNode(content, mode){ return {type:'file', content: content || '', mode: mode || '-rw-r--r--'}; }
+
+const root = dirNode({
+  home: dirNode({
+    user: dirNode({
+      'README.txt': fileNode(
+`Bienvenue dans le simulateur de terminal !
+
+Ce dossier contient les exercices du livre. Utilisez les commandes
+que vous apprenez au fil des chapitres pour les explorer.
+
+Essayez pour commencer :
+  ls -la
+  cd exercices
+  cat 01-navigation/indices.txt
+
+Tapez "help" à tout moment pour la liste des commandes,
+ou "man <commande>" pour l'aide détaillée d'une commande.`),
+      exercices: dirNode({
+        '01-navigation': dirNode({
+          'indices.txt': fileNode(
+`Objectif : se déplacer dans l'arborescence.
+
+- pwd affiche le dossier courant
+- cd <dossier> permet de se déplacer
+- cd .. remonte d'un niveau
+- ls -la liste tout, y compris les fichiers cachés`),
+          '.secret': fileNode('Bravo, vous avez trouvé un fichier caché avec ls -a !')
+        }),
+        '02-permissions': dirNode({
+          'fichier_prive.txt': fileNode('Ce fichier appartient à user, mode -rw-------.', '-rw-------'),
+          'script.sh': fileNode('#!/bin/bash\necho "Essayez : chmod +x script.sh"', '-rw-r--r--')
+        }),
+        '03-recherche': dirNode({
+          'journal.log': fileNode(
+`2026-07-10 08:12:01 INFO  démarrage du service
+2026-07-10 08:12:03 INFO  connexion à la base de données
+2026-07-10 08:14:22 ERROR délai dépassé sur la requête
+2026-07-10 08:14:23 INFO  nouvelle tentative
+2026-07-10 08:14:25 INFO  connexion rétablie
+2026-07-10 09:02:11 WARN  utilisation mémoire élevée
+2026-07-10 09:45:00 ERROR échec d'écriture disque
+2026-07-10 10:00:00 INFO  sauvegarde effectuée`)
+        })
+      }),
+      projets: dirNode({})
+    })
+  }),
+  etc: dirNode({
+    hostname: fileNode('simulateur-linux'),
+    passwd: fileNode('user:x:1000:1000:Utilisateur:/home/user:/bin/bash')
+  }),
+  var: dirNode({ log: dirNode({ syslog: fileNode('Aucun événement système simulé pour le moment.') }) }),
+  bin: dirNode({}),
+  tmp: dirNode({})
+});
+
+let cwd = ['home','user'];
+const env = { HOME:'/home/user', USER:'user', PWD:'/home/user', SHELL:'/bin/bash', PATH:'/usr/bin:/bin' };
+
+function resolvePath(input){
+  let parts;
+  if(input.startsWith('/')) parts = [];
+  else if(input === '~' || input.startsWith('~/')){
+    parts = ['home','user'];
+    input = input.slice(1);
+    if(input.startsWith('/')) input = input.slice(1);
+  } else parts = cwd.slice();
+  for(const seg of input.split('/').filter(Boolean)){
+    if(seg === '.') continue;
+    else if(seg === '..') parts.pop();
+    else parts.push(seg);
+  }
+  return parts;
+}
+function getNode(parts){
+  let node = root;
+  for(const p of parts){
+    if(!node || node.type !== 'dir' || !node.children[p]) return null;
+    node = node.children[p];
+  }
+  return node;
+}
+function splitParent(parts){
+  return { parentParts: parts.slice(0,-1), name: parts[parts.length-1] };
+}
+function pathStr(parts){ return '/' + parts.join('/'); }
+function displayPath(parts){
+  const s = pathStr(parts);
+  return s === '/home/user' ? '~' : s.replace(/^\/home\/user/, '~');
+}
+
+/* ============================================================
+   TERMINAL — état, rendu, historique
+   ============================================================ */
+const screenEl = document.getElementById('screen');
+const tbPath = document.getElementById('tb-path');
+const history = [];
+let historyIndex = -1;
+
+function printLine(text, cls){
+  const div = document.createElement('div');
+  div.className = 'line ' + (cls || 'out');
+  div.textContent = text;
+  screenEl.appendChild(div);
+}
+function printHTML(html, cls){
+  const div = document.createElement('div');
+  div.className = 'line ' + (cls || 'out');
+  div.innerHTML = html;
+  screenEl.appendChild(div);
+}
+function printBlock(text, cls){
+  if(text === undefined || text === null || text === '') return;
+  text.split('\n').forEach(l => printLine(l, cls));
+}
+function scrollBottom(){ screenEl.parentElement.scrollTop = 0; screenEl.scrollTop = screenEl.scrollHeight; }
+function currentPrompt(){
+  return `<span class="prompt-user">user@simulateur-linux</span><span class="prompt-sym">:</span><span class="prompt-path">${displayPath(cwd)}</span><span class="prompt-sym">$</span> `;
+}
+function refreshTitlebar(){ tbPath.textContent = displayPath(cwd); }
+
+/* ============================================================
+   AIDE / MAN
+   ============================================================ */
+const MANUAL = {
+  ls: "ls [-l] [-a] [chemin] — liste le contenu d'un dossier.\n  -l  affichage détaillé (permissions, taille)\n  -a  affiche aussi les fichiers cachés (commençant par .)",
+  cd: "cd [chemin] — change de dossier courant. 'cd' seul ou 'cd ~' retourne à la maison. 'cd ..' remonte d'un niveau.",
+  pwd: "pwd — affiche le chemin absolu du dossier courant.",
+  mkdir: "mkdir <nom> — crée un nouveau dossier.",
+  touch: "touch <nom> — crée un fichier vide, ou met à jour sa date si il existe déjà.",
+  rm: "rm [-r] [-f] <cible> — supprime un fichier. -r pour supprimer un dossier et son contenu, -f pour ne pas demander de confirmation.",
+  cp: "cp <source> <destination> — copie un fichier.",
+  mv: "mv <source> <destination> — déplace ou renomme un fichier ou dossier.",
+  cat: "cat <fichier...> — affiche le contenu d'un ou plusieurs fichiers.",
+  echo: "echo <texte> — affiche du texte. Peut être redirigé vers un fichier avec > ou >>.",
+  grep: "grep [-i] [-v] <motif> [fichier] — filtre les lignes contenant (ou ne contenant pas avec -v) un motif. -i ignore la casse.",
+  find: "find <chemin> -name <motif> — recherche des fichiers/dossiers par nom dans une arborescence.",
+  head: "head [-n N] <fichier> — affiche les N premières lignes (10 par défaut).",
+  tail: "tail [-n N] <fichier> — affiche les N dernières lignes (10 par défaut).",
+  wc: "wc [-l] <fichier> — compte lignes, mots et caractères (-l pour les lignes seulement).",
+  sort: "sort <fichier> — trie les lignes par ordre alphabétique.",
+  uniq: "uniq <fichier> — supprime les lignes dupliquées consécutives.",
+  sed: "sed 's/motif/remplacement/' <fichier> — remplace la première occurrence de motif par remplacement sur chaque ligne. Ajoutez /g pour remplacer toutes les occurrences.",
+  export: "export VAR=valeur — définit une variable d'environnement, utilisable ensuite via $VAR.",
+  history: "history — affiche l'historique des commandes tapées durant cette session.",
+  whoami: "whoami — affiche le nom de l'utilisateur courant.",
+  date: "date — affiche la date et l'heure courantes.",
+  clear: "clear — efface l'écran du terminal.",
+  chmod: "chmod <mode> <fichier> — modifie les permissions d'un fichier, ex : chmod +x script.sh ou chmod 644 fichier.",
+  ps: "ps — liste les processus en cours d'exécution (simulés).",
+  df: "df — affiche l'utilisation de l'espace disque (simulé).",
+  nano: "nano <fichier> — ouvre un éditeur de texte simplifié pour modifier un fichier.",
+  man: "man <commande> — affiche le manuel détaillé d'une commande.",
+  help: "help — affiche la liste de toutes les commandes disponibles.",
+  shutdown: "shutdown now — arrête le système simulé.",
+  reboot: "reboot — redémarre le système simulé (relance la séquence de démarrage).",
+  poweroff: "poweroff — équivalent de shutdown now.",
+  halt: "halt — arrête immédiatement le système simulé."
+};
+const HELP_TEXT = `Commandes disponibles :
+
+  Navigation & fichiers   ls, cd, pwd, mkdir, touch, rm, cp, mv, cat, echo, nano
+  Recherche & texte       grep, find, head, tail, wc, sort, uniq, sed
+  Shell                   export, history, |  (pipe), >  >> (redirection), Tab (complétion)
+  Système                 whoami, date, clear, chmod, ps, df, man, help, shutdown, reboot, poweroff, halt
+
+Tapez "man <commande>" pour le détail d'une commande précise.`;
+
+/* ============================================================
+   COMMANDES
+   ============================================================ */
+function fail(msg){ return { out:'', err: msg, code:1 }; }
+function ok(out){ return { out: out || '', err:'', code:0 }; }
+
+function cmd_pwd(){ return ok(pathStr(cwd)); }
+
+function cmd_cd(args){
+  const target = args[0] || '~';
+  const parts = resolvePath(target);
+  if(parts.length === 0){ cwd = []; return ok(''); }
+  const node = getNode(parts);
+  if(!node) return fail(`cd : ${target} : dossier introuvable`);
+  if(node.type !== 'dir') return fail(`cd : ${target} : n'est pas un dossier`);
+  cwd = parts;
+  env.PWD = pathStr(cwd);
+  return ok('');
+}
+
+function cmd_ls(args){
+  let showAll=false, long=false;
+  const paths=[];
+  for(const a of args){
+    if(a.startsWith('-')){
+      if(a.includes('a')) showAll=true;
+      if(a.includes('l')) long=true;
+    } else paths.push(a);
+  }
+  const target = paths.length ? resolvePath(paths[0]) : cwd;
+  const node = getNode(target);
+  if(!node) return fail(`ls : ${paths[0]} : introuvable`);
+  if(node.type === 'file') return ok(paths[0]);
+  let names = Object.keys(node.children);
+  if(!showAll) names = names.filter(n => !n.startsWith('.'));
+  names.sort();
+  if(!long) return ok(names.join('  '));
+  const lines = names.map(n=>{
+    const child = node.children[n];
+    const mode = child.mode || (child.type==='dir' ? 'drwxr-xr-x' : '-rw-r--r--');
+    const size = child.type === 'file' ? child.content.length : 4096;
+    const label = child.type === 'dir' ? n + '/' : n;
+    return `${child.type==='dir'?'d':'-'}${mode.slice(1)}  user  ${String(size).padStart(5,' ')}  ${label}`;
+  });
+  return ok(lines.join('\n'));
+}
+
+function cmd_mkdir(args){
+  if(!args[0]) return fail('mkdir : nom de dossier manquant');
+  const parts = resolvePath(args[0]);
+  const {parentParts, name} = splitParent(parts);
+  const parent = getNode(parentParts);
+  if(!parent || parent.type !== 'dir') return fail(`mkdir : chemin invalide`);
+  if(parent.children[name]) return fail(`mkdir : ${args[0]} existe déjà`);
+  parent.children[name] = dirNode({});
+  return ok('');
+}
+
+function cmd_touch(args){
+  if(!args[0]) return fail('touch : nom de fichier manquant');
+  const parts = resolvePath(args[0]);
+  const {parentParts, name} = splitParent(parts);
+  const parent = getNode(parentParts);
+  if(!parent || parent.type !== 'dir') return fail('touch : chemin invalide');
+  if(!parent.children[name]) parent.children[name] = fileNode('');
+  return ok('');
+}
+
+function cmd_rm(args){
+  let recursive=false, force=false;
+  const paths=[];
+  for(const a of args){
+    if(a.startsWith('-')){
+      if(a.includes('r')) recursive=true;
+      if(a.includes('f')) force=true;
+    } else paths.push(a);
+  }
+  if(!paths[0]) return force ? ok('') : fail('rm : cible manquante');
+  const parts = resolvePath(paths[0]);
+  const {parentParts, name} = splitParent(parts);
+  const parent = getNode(parentParts);
+  if(!parent || !parent.children[name]) return force ? ok('') : fail(`rm : ${paths[0]} : introuvable`);
+  const target = parent.children[name];
+  if(target.type === 'dir' && Object.keys(target.children).length && !recursive)
+    return fail(`rm : ${paths[0]} : dossier non vide (utilisez -r)`);
+  delete parent.children[name];
+  return ok('');
+}
+
+function cmd_cp(args){
+  if(args.length < 2) return fail('cp : usage cp source destination');
+  const srcParts = resolvePath(args[0]);
+  const srcNode = getNode(srcParts);
+  if(!srcNode) return fail(`cp : ${args[0]} : introuvable`);
+  const destParts = resolvePath(args[1]);
+  let {parentParts, name} = splitParent(destParts);
+  let destParent = getNode(parentParts);
+  const maybeDestDir = getNode(destParts);
+  if(maybeDestDir && maybeDestDir.type === 'dir'){ destParent = maybeDestDir; name = srcParts[srcParts.length-1]; }
+  if(!destParent || destParent.type !== 'dir') return fail('cp : destination invalide');
+  destParent.children[name] = JSON.parse(JSON.stringify(srcNode));
+  return ok('');
+}
+
+function cmd_mv(args){
+  const r = cmd_cp(args);
+  if(r.code !== 0) return r;
+  return cmd_rm([args[0]]);
+}
+
+function readFileByParts(parts){
+  const node = getNode(parts);
+  if(!node) return null;
+  if(node.type !== 'file') return undefined;
+  return node.content;
+}
+
+function cmd_cat(args, stdin){
+  if(!args.length) return ok(stdin || '');
+  const outs = [];
+  for(const a of args){
+    const content = readFileByParts(resolvePath(a));
+    if(content === null) return fail(`cat : ${a} : introuvable`);
+    if(content === undefined) return fail(`cat : ${a} : est un dossier`);
+    outs.push(content);
+  }
+  return ok(outs.join('\n'));
+}
+
+function cmd_echo(args, stdin, rawArgString){
+  let text = rawArgString !== undefined ? rawArgString : args.join(' ');
+  return ok(text);
+}
+
+function cmd_grep(args, stdin){
+  let ignoreCase=false, invert=false;
+  const rest=[];
+  for(const a of args){
+    if(a.startsWith('-') && a !== '-'){
+      if(a.includes('i')) ignoreCase=true;
+      if(a.includes('v')) invert=true;
+    } else rest.push(a);
+  }
+  const pattern = rest[0];
+  if(pattern === undefined) return fail('grep : motif manquant');
+  let text = stdin;
+  if(rest[1]){
+    const content = readFileByParts(resolvePath(rest[1]));
+    if(content === null || content === undefined) return fail(`grep : ${rest[1]} : introuvable`);
+    text = content;
+  }
+  if(text === undefined) return fail('grep : aucune entrée');
+  const lines = text.split('\n');
+  const test = l => ignoreCase ? l.toLowerCase().includes(pattern.toLowerCase()) : l.includes(pattern);
+  const filtered = lines.filter(l => invert ? !test(l) : test(l));
+  return ok(filtered.join('\n'));
+}
+
+function collectPaths(parts, acc){
+  const node = getNode(parts);
+  if(!node) return;
+  acc.push(parts);
+  if(node.type === 'dir'){
+    for(const key of Object.keys(node.children)) collectPaths(parts.concat(key), acc);
+  }
+}
+function cmd_find(args){
+  const startPath = args[0] && !args[0].startsWith('-') ? args[0] : '.';
+  const nameIdx = args.indexOf('-name');
+  const pattern = nameIdx !== -1 ? args[nameIdx+1] : null;
+  const startParts = resolvePath(startPath);
+  if(!getNode(startParts)) return fail(`find : ${startPath} : introuvable`);
+  const acc = [];
+  collectPaths(startParts, acc);
+  let results = acc.map(p => pathStr(p));
+  if(pattern){
+    const regex = new RegExp('^' + pattern.split('*').map(s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('.*') + '$');
+    results = results.filter(p => regex.test(p.split('/').pop()));
+  }
+  return ok(results.join('\n'));
+}
+
+function cmd_head(args, stdin){
+  let n=10; const rest=[];
+  for(let i=0;i<args.length;i++){
+    if(args[i]==='-n'){ n=parseInt(args[++i],10)||10; }
+    else rest.push(args[i]);
+  }
+  let text = stdin;
+  if(rest[0]){
+    const c = readFileByParts(resolvePath(rest[0]));
+    if(c === null || c === undefined) return fail(`head : ${rest[0]} : introuvable`);
+    text = c;
+  }
+  if(text === undefined) return fail('head : aucune entrée');
+  return ok(text.split('\n').slice(0,n).join('\n'));
+}
+function cmd_tail(args, stdin){
+  let n=10; const rest=[];
+  for(let i=0;i<args.length;i++){
+    if(args[i]==='-n'){ n=parseInt(args[++i],10)||10; }
+    else rest.push(args[i]);
+  }
+  let text = stdin;
+  if(rest[0]){
+    const c = readFileByParts(resolvePath(rest[0]));
+    if(c === null || c === undefined) return fail(`tail : ${rest[0]} : introuvable`);
+    text = c;
+  }
+  if(text === undefined) return fail('tail : aucune entrée');
+  const lines = text.split('\n');
+  return ok(lines.slice(Math.max(0,lines.length-n)).join('\n'));
+}
+function cmd_wc(args, stdin){
+  const linesOnly = args.includes('-l');
+  const rest = args.filter(a=>!a.startsWith('-'));
+  let text = stdin;
+  if(rest[0]){
+    const c = readFileByParts(resolvePath(rest[0]));
+    if(c === null || c === undefined) return fail(`wc : ${rest[0]} : introuvable`);
+    text = c;
+  }
+  if(text === undefined) return fail('wc : aucune entrée');
+  const lines = text.split('\n').length;
+  if(linesOnly) return ok(String(lines));
+  const words = text.trim().length ? text.trim().split(/\s+/).length : 0;
+  const chars = text.length;
+  return ok(`${lines}  ${words}  ${chars}`);
+}
+function cmd_sort(args, stdin){
+  const rest = args.filter(a=>!a.startsWith('-'));
+  let text = stdin;
+  if(rest[0]){
+    const c = readFileByParts(resolvePath(rest[0]));
+    if(c === null || c === undefined) return fail(`sort : ${rest[0]} : introuvable`);
+    text = c;
+  }
+  if(text === undefined) return fail('sort : aucune entrée');
+  return ok(text.split('\n').sort().join('\n'));
+}
+function cmd_uniq(args, stdin){
+  const rest = args.filter(a=>!a.startsWith('-'));
+  let text = stdin;
+  if(rest[0]){
+    const c = readFileByParts(resolvePath(rest[0]));
+    if(c === null || c === undefined) return fail(`uniq : ${rest[0]} : introuvable`);
+    text = c;
+  }
+  if(text === undefined) return fail('uniq : aucune entrée');
+  const lines = text.split('\n');
+  const out = [];
+  for(const l of lines) if(out.length===0 || out[out.length-1] !== l) out.push(l);
+  return ok(out.join('\n'));
+}
+function cmd_sed(args, stdin){
+  const expr = args[0];
+  const rest = args.slice(1);
+  const m = expr && expr.match(/^s\/(.*?)\/(.*?)\/(g)?$/);
+  if(!m) return fail("sed : expression attendue sous la forme s/motif/remplacement/");
+  let text = stdin;
+  if(rest[0]){
+    const c = readFileByParts(resolvePath(rest[0]));
+    if(c === null || c === undefined) return fail(`sed : ${rest[0]} : introuvable`);
+    text = c;
+  }
+  if(text === undefined) return fail('sed : aucune entrée');
+  const [, pattern, replacement, g] = m;
+  return ok(text.split('\n').map(l => l.replace(new RegExp(pattern, g?'g':''), replacement)).join('\n'));
+}
+
+function cmd_export(args){
+  const joined = args.join(' ');
+  const m = joined.match(/^(\w+)=(.*)$/);
+  if(!m) return fail('export : usage export VAR=valeur');
+  env[m[1]] = m[2].replace(/^"(.*)"$/,'$1').replace(/^'(.*)'$/,'$1');
+  return ok('');
+}
+function cmd_history(){ return ok(history.map((h,i)=>`  ${i+1}  ${h}`).join('\n')); }
+function cmd_whoami(){ return ok(env.USER); }
+function cmd_date(){ return ok(new Date().toString()); }
+function cmd_chmod(args){
+  if(args.length < 2) return fail('chmod : usage chmod <mode> <fichier>');
+  const [mode, target] = args;
+  const node = getNode(resolvePath(target));
+  if(!node) return fail(`chmod : ${target} : introuvable`);
+  if(mode === '+x') node.mode = node.mode.slice(0,3) + 'x' + node.mode.slice(4);
+  else if(/^[0-7]{3,4}$/.test(mode)) node.mode = '-' + octalToRwx(mode.slice(-3));
+  else node.mode = mode;
+  return ok('');
+}
+function octalToRwx(oct){
+  const map = {0:'---',1:'--x',2:'-w-',3:'-wx',4:'r--',5:'r-x',6:'rw-',7:'rwx'};
+  return oct.split('').map(d=>map[d]||'---').join('');
+}
+function cmd_ps(){
+  return ok(
+`  PID  CMD
+    1  /sbin/init
+   88  bash
+  142  simulateur-terminal`
+  );
+}
+function cmd_df(){
+  return ok(
+`Système de fichiers   Taille  Utilisé  Dispo  Uti%
+/dev/sda1               20G      6.4G    13G    34%
+tmpfs                  1.9G       0     1.9G     0%`
+  );
+}
+function cmd_man(args){
+  const c = args[0];
+  if(!c) return fail('man : quelle commande ? ex : man ls');
+  if(!MANUAL[c]) return fail(`man : aucune entrée pour ${c}`);
+  return ok(MANUAL[c]);
+}
+function cmd_help(){ return ok(HELP_TEXT); }
+function cmd_clear(){ screenEl.innerHTML=''; return ok(null); }
+
+let editingPath = null;
+function cmd_nano(args){
+  const name = args[0];
+  if(!name) return fail('nano : nom de fichier manquant');
+  const parts = resolvePath(name);
+  let node = getNode(parts);
+  if(!node){
+    const {parentParts, name:fname} = splitParent(parts);
+    const parent = getNode(parentParts);
+    if(!parent || parent.type !== 'dir') return fail('nano : chemin invalide');
+    parent.children[fname] = fileNode('');
+    node = parent.children[fname];
+  }
+  if(node.type !== 'file') return fail(`nano : ${name} : est un dossier`);
+  openEditor(parts, node);
+  return ok(null, true);
+}
+
+const COMMANDS = {
+  pwd:cmd_pwd, cd:cmd_cd, ls:cmd_ls, mkdir:cmd_mkdir, touch:cmd_touch, rm:cmd_rm,
+  cp:cmd_cp, mv:cmd_mv, cat:cmd_cat, echo:cmd_echo, grep:cmd_grep, find:cmd_find,
+  head:cmd_head, tail:cmd_tail, wc:cmd_wc, sort:cmd_sort, uniq:cmd_uniq, sed:cmd_sed,
+  export:cmd_export, history:cmd_history, whoami:cmd_whoami, date:cmd_date,
+  chmod:cmd_chmod, ps:cmd_ps, df:cmd_df, man:cmd_man, help:cmd_help, clear:cmd_clear, nano:cmd_nano, vi:cmd_nano,
+  shutdown:cmd_clear, reboot:cmd_clear, poweroff:cmd_clear, halt:cmd_clear
+};
+
+/* ============================================================
+   TOKENISATION, VARIABLES, PIPES, REDIRECTIONS
+   ============================================================ */
+function expandVars(str){
+  return str.replace(/\$\{(\w+)\}|\$(\w+)/g, (m,a,b)=> {
+    const key = a || b;
+    return env.hasOwnProperty(key) ? env[key] : '';
+  });
+}
+function tokenize(str){
+  const tokens = [];
+  let i=0, cur='', quote=null;
+  while(i < str.length){
+    const c = str[i];
+    if(quote){
+      if(c === quote){ quote=null; }
+      else cur += c;
+    } else if(c === '"' || c === "'"){
+      quote = c;
+      if(c === "'") { /* single quotes: no expansion, mark raw below */ }
+    } else if(/\s/.test(c)){
+      if(cur.length){ tokens.push(cur); cur=''; }
+    } else {
+      cur += c;
+    }
+    i++;
+  }
+  if(cur.length) tokens.push(cur);
+  return tokens;
+}
+
+function runSegment(name, args, stdin){
+  const fn = COMMANDS[name];
+  if(!fn) return fail(`${name} : commande introuvable. Tapez "help" pour la liste des commandes.`);
+  return fn(args, stdin);
+}
+
+function executeLine(raw){
+  // Redirection detection on the whole line (applies to final command output)
+  let line = raw;
+  let redirect = null; // {mode:'>'|'>>', file}
+  const redirMatch = line.match(/\s(>{1,2})\s*(\S+)\s*$/);
+  if(redirMatch){
+    redirect = { mode: redirMatch[1], file: redirMatch[2] };
+    line = line.slice(0, redirMatch.index);
+  }
+  const segments = line.split('|').map(s=>s.trim()).filter(Boolean);
+  if(!segments.length) return {out:'', err:'', code:0};
+
+  let stdin = undefined;
+  let result = {out:'', err:'', code:0};
+
+  for(const seg of segments){
+    const expanded = expandVars(seg);
+    const rawArgString = expanded.replace(/^\S+\s*/, '');
+    const tokens = tokenize(expanded);
+    const name = tokens[0];
+    const args = tokens.slice(1);
+    result = runSegment(name, args, stdin, rawArgString);
+    if(name === 'echo') result = cmd_echo(args, stdin, rawArgString);
+    if(result.code !== 0){ return result; }
+    stdin = result.out;
+  }
+
+  if(redirect){
+    const parts = resolvePath(redirect.file);
+    const {parentParts, name} = splitParent(parts);
+    const parent = getNode(parentParts);
+    if(!parent || parent.type !== 'dir') return fail(`${redirect.file} : chemin invalide`);
+    const existing = parent.children[name];
+    const prev = (existing && existing.type === 'file') ? existing.content : '';
+    const newContent = redirect.mode === '>>' ? (prev ? prev + '\n' + (result.out||'') : (result.out||'')) : (result.out||'');
+    parent.children[name] = fileNode(newContent);
+    return {out:'', err:'', code:0};
+  }
+  return result;
+}
+
+/* ============================================================
+   BOUCLE D'ENTRÉE, HISTORIQUE, COMPLÉTION
+   ============================================================ */
+function renderPromptLine(){
+  const wrap = document.createElement('div');
+  wrap.id = 'inputline';
+  wrap.innerHTML = `<span class="prefix">${currentPrompt()}</span>`;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.id = 'cmdinput';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  wrap.appendChild(input);
+  screenEl.appendChild(wrap);
+  input.focus();
+  input.addEventListener('keydown', onKeyDown);
+  scrollBottom();
+  return input;
+}
+
+function onKeyDown(e){
+  const input = e.target;
+  const ctrl = e.ctrlKey || e.metaKey;
+  const key = e.key.toLowerCase();
+
+  // Raccourcis type "vrai terminal" — on intercepte avant que le navigateur
+  // ne les récupère (Ctrl+L irait sinon vers la barre d'adresse, etc.)
+  if(ctrl && key === 'l'){
+    e.preventDefault(); e.stopPropagation();
+    screenEl.innerHTML = '';
+    renderPromptLine();
+    return;
+  }
+  if(ctrl && key === 'c'){
+    e.preventDefault(); e.stopPropagation();
+    printLine(currentPromptText() + input.value + '^C', 'cmd');
+    input.value = '';
+    historyIndex = -1;
+    const wrap = input.closest('#inputline');
+    if(wrap) wrap.remove();
+    renderPromptLine();
+    return;
+  }
+  if(ctrl && key === 'u'){
+    e.preventDefault(); e.stopPropagation();
+    input.value = input.value.slice(input.selectionStart);
+    return;
+  }
+  if(ctrl && key === 'k'){
+    e.preventDefault(); e.stopPropagation();
+    input.value = input.value.slice(0, input.selectionStart);
+    return;
+  }
+  if(ctrl && key === 'a'){
+    e.preventDefault(); e.stopPropagation();
+    input.setSelectionRange(0,0);
+    return;
+  }
+  if(ctrl && key === 'e'){
+    e.preventDefault(); e.stopPropagation();
+    input.setSelectionRange(input.value.length, input.value.length);
+    return;
+  }
+  if(ctrl && key === 'w'){
+    e.preventDefault(); e.stopPropagation();
+    const pos = input.selectionStart;
+    const before = input.value.slice(0,pos).replace(/\S+\s*$/,'');
+    input.value = before + input.value.slice(pos);
+    input.setSelectionRange(before.length, before.length);
+    return;
+  }
+
+  if(e.key === 'Enter'){
+    const value = input.value;
+    submitLine(value, input);
+  } else if(e.key === 'ArrowUp'){
+    e.preventDefault();
+    if(history.length){
+      historyIndex = Math.max(0, (historyIndex===-1?history.length:historyIndex)-1);
+      input.value = history[historyIndex] || '';
+    }
+  } else if(e.key === 'ArrowDown'){
+    e.preventDefault();
+    if(historyIndex !== -1){
+      historyIndex++;
+      if(historyIndex >= history.length){ historyIndex=-1; input.value=''; }
+      else input.value = history[historyIndex];
+    }
+  } else if(e.key === 'Tab'){
+    e.preventDefault();
+    doTabCompletion(input);
+  }
+}
+
+function doTabCompletion(input){
+  const val = input.value;
+  const parts = val.split(' ');
+  const last = parts[parts.length-1];
+  let candidates;
+  if(parts.length === 1){
+    candidates = Object.keys(COMMANDS).filter(c => c.startsWith(last));
+  } else {
+    const dirParts = last.includes('/') ? resolvePath(last.split('/').slice(0,-1).join('/')) : cwd;
+    const prefix = last.includes('/') ? last.split('/').pop() : last;
+    const node = getNode(dirParts);
+    candidates = node && node.type === 'dir' ? Object.keys(node.children).filter(n=>n.startsWith(prefix)) : [];
+  }
+  if(candidates.length === 1){
+    parts[parts.length-1] = (last.includes('/') ? last.slice(0,last.lastIndexOf('/')+1) : '') + candidates[0];
+    input.value = parts.join(' ');
+  } else if(candidates.length > 1){
+    printLine(currentPromptText() + val, 'cmd');
+    printLine(candidates.join('  '), 'dim');
+  }
+}
+function currentPromptText(){
+  return `user@simulateur-linux:${displayPath(cwd)}$ `;
+}
+
+function submitLine(value, input){
+  input.disabled = true;
+  const trimmed = value.trim();
+  printLine(currentPromptText() + value, 'cmd');
+  if(trimmed.length){
+    history.push(trimmed);
+    historyIndex = -1;
+  }
+  const firstWord = trimmed.split(/\s+/)[0];
+  if(['shutdown','reboot','poweroff','halt'].includes(firstWord)){
+    const wrap = input.closest('#inputline');
+    if(wrap) wrap.remove();
+    doShutdown(firstWord);
+    return;
+  }
+  if(trimmed.length){
+    try{
+      const result = executeLine(trimmed);
+      if(result.err) printBlock(result.err, 'err');
+      else if(result.out !== null) printBlock(result.out, 'out');
+    } catch(err){
+      printLine('Erreur interne du simulateur : ' + err.message, 'err');
+    }
+  }
+  refreshTitlebar();
+  const wrap = input.closest('#inputline');
+  if(wrap) wrap.remove();
+  if(!editorOpen) renderPromptLine();
+}
+
+async function doShutdown(cmdName){
+  const isReboot = cmdName === 'reboot';
+  await sleep(300);
+  printLine(`Broadcast message from user@simulateur-linux (${new Date().toString()}):`, 'dim');
+  printLine(isReboot ? 'Le système va redémarrer MAINTENANT !' : 'Le système va s\'arrêter MAINTENANT !', 'err');
+  await sleep(500);
+  printLine('', 'out');
+  printBlock('Arrêt des services...                          [ OK ]\nDémontage des systèmes de fichiers...          [ OK ]\nArrêt du shell...                              [ OK ]', 'dim');
+  await sleep(800);
+  screenEl.innerHTML = '';
+  if(isReboot){
+    await sleep(500);
+    cwd = ['home','user'];
+    boot();
+  } else {
+    const msg = document.createElement('div');
+    msg.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;text-align:center;padding:20px;';
+    msg.textContent = 'Système arrêté. Rechargez la page pour redémarrer le simulateur.';
+    screenEl.parentElement.appendChild(msg);
+  }
+}
+
+/* ============================================================
+   ÉDITEUR NANO
+   ============================================================ */
+let editorOpen = false;
+let editorTarget = null;
+const editorEl = document.getElementById('editor');
+const editorTextEl = document.getElementById('editor-text');
+const editorBarEl = document.getElementById('editor-bar');
+
+function openEditor(parts, node){
+  editorOpen = true;
+  editorTarget = { parts, node };
+  editorBarEl.textContent = '  GNU nano — ' + pathStr(parts);
+  editorTextEl.value = node.content;
+  editorEl.classList.add('show');
+  setTimeout(()=>editorTextEl.focus(), 10);
+}
+function closeEditor(save){
+  if(save && editorTarget) editorTarget.node.content = editorTextEl.value;
+  editorEl.classList.remove('show');
+  editorOpen = false;
+  editorTarget = null;
+  renderPromptLine();
+}
+editorTextEl.addEventListener('keydown', function(e){
+  if(e.ctrlKey && e.key.toLowerCase()==='s'){ e.preventDefault(); closeEditor(true); openEditorAgainMessage(); }
+  else if(e.ctrlKey && e.key.toLowerCase()==='x'){ e.preventDefault(); closeEditor(true); }
+  else if(e.key === 'Escape'){ e.preventDefault(); closeEditor(false); }
+});
+function openEditorAgainMessage(){ /* Ctrl+S : enregistrement silencieux, on referme comme un vrai nano rapide */ }
+
+/* ============================================================
+   BOOT SEQUENCE
+   ============================================================ */
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function sleep(ms){ return new Promise(r=>setTimeout(r, reducedMotion ? 0 : ms)); }
+
+async function boot(){
+  const bootLines = [
+    ["Démarrage de l'environnement Linux virtuel...", 'dim'],
+    ['Chargement des modules du noyau...            [ OK ]', 'dim'],
+    ['Montage des systèmes de fichiers...            [ OK ]', 'dim'],
+    ['Démarrage du shell bash...                     [ OK ]', 'ok'],
+  ];
+  for(const [text, cls] of bootLines){
+    printLine(text, cls);
+    scrollBottom();
+    await sleep(220);
+  }
+  printLine('', 'out');
+  printBlock("Bienvenue dans le simulateur de terminal — le compagnon pratique de votre livre sur Linux.\nTapez \"help\" pour voir les commandes disponibles, ou \"man <commande>\" pour le détail de l'une d'elles.", 'out');
+  printLine('', 'out');
+  refreshTitlebar();
+  renderPromptLine();
+}
+
+
+/* ============================================================
+   FOCUS GLOBAL
+   ============================================================ */
+document.addEventListener('click', ()=>{
+  if(editorOpen) return;
+  const active = document.getElementById('cmdinput');
+  if(active) active.focus();
+});
+
+boot();
+})();
+</script>
+</body>
+</html>
