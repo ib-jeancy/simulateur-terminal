@@ -223,6 +223,7 @@ const state = {
   exited: false,
   rebootRequested: false,
   sudoUntil: 0,
+  umask: 0o022,
   // Hooks fournis par l'interface (null en mode test Node)
   io: {
     write: null,       // (text, cls) => void  — écriture directe à l'écran
@@ -346,7 +347,7 @@ function writeFile(path, content, append){
   if(dir.err) return {err:`${dirnameOf(path)}: Aucun fichier ou dossier de ce type`};
   if(dir.node.type !== 'dir') return {err:`${dirnameOf(path)}: n'est pas un dossier`};
   if(!canWrite(dir.node)) return {err:`${path}: Permission non accordée`};
-  const n = fnode(content, 0o644, state.user, state.user);
+  const n = fnode(content, 0o666 & ~(state.umask || 0), state.user, state.user);
   dir.node.children[basenameOf(path)] = n;
   dir.node.mtime = now();
   return {ok:true, node:n};
@@ -751,6 +752,7 @@ function resetAll(){
   state.lastExit = 0;
   state.exited = false;
   state.sudoUntil = 0;
+  state.umask = 0o022;
   state.bootTime = now();
   state.nextPid = 400;
   buildSystem();
@@ -905,6 +907,14 @@ function tokenize(src){
       toks.push(t); pendingHere.push({tok:t, delim});
       continue;
     }
+    if(src.startsWith('((', i)){
+      const end = matchParen(src, i);
+      if(end > 0 && src[end-1] === ')'){
+        toks.push({type:'arith', expr: src.slice(i+2, end-1)});
+        i = end + 1;
+        continue;
+      }
+    }
     if(src.startsWith('&&', i)){ i += 2; toks.push({type:'op', value:'&&'}); continue; }
     if(src.startsWith('||', i)){ i += 2; toks.push({type:'op', value:'||'}); continue; }
     if(src.startsWith('>>', i)){ i += 2; toks.push({type:'redir', fd:1, op:'>>'}); continue; }
@@ -1008,6 +1018,17 @@ function parse(src){
 
   function parseFor(){
     eatWord('for');
+    const cTok = peek();
+    if(cTok && cTok.type === 'arith'){
+      p++;
+      const seg = cTok.expr.split(';');
+      const init = seg[0] || '', cond = seg.length > 1 ? seg[1] : '1', step = seg[2] || '';
+      while(at(';') || at('\n')) p++;
+      eatWord('do');
+      const body = parseSeq(['done']);
+      eatWord('done');
+      return {type:'cfor', init, cond, step, body, redirs:[]};
+    }
     const nameTok = peek();
     if(!nameTok || nameTok.type !== 'word') throw Incomplete('variable');
     const name = wordText(nameTok.parts); p++;
@@ -1039,6 +1060,13 @@ function parse(src){
     if(p >= toks.length) throw Incomplete('commande');
     let neg = false;
     if(peekWordText() === '!'){ p++; neg = true; skipNL(); }
+    const tk0 = peek();
+    if(tk0 && tk0.type === 'arith'){
+      p++;
+      let node0 = {type:'arithcmd', expr:tk0.expr, redirs:[]};
+      parseRedirs(node0.redirs);
+      return neg ? {type:'negate', child:node0} : node0;
+    }
     const w = peekWordText();
     let node;
     if(w === 'if') node = parseIf();
@@ -1140,6 +1168,7 @@ function parse(src){
 function Flow(kind, code, n){ const e = new Error('flow'); e.flow = kind; e.code = code; e.n = n; return e; }
 
 let positional = [];
+let funcDepth = 0;
 
 function paramValue(spec){
   if(spec === '?') return String(state.lastExit);
@@ -1213,8 +1242,34 @@ function arith(expr){
     else return v; } }
   function andx(){ let v = cmp(); for(;;){ ws(); if(s.startsWith('&&',i)){ i+=2; const r = cmp(); v = (v && r) ? 1:0; } else return v; } }
   function orx(){ let v = andx(); for(;;){ ws(); if(s.startsWith('||',i)){ i+=2; const r = andx(); v = (v || r) ? 1:0; } else return v; } }
-  const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=([^=].*)$/.exec(s);
-  if(m){ const v = arith(m[2]); setVar(m[1], String(v)); return v; }
+  const inc = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(\+\+|--)\s*$/.exec(s);
+  if(inc){
+    const before = parseInt(getVar(inc[1]), 10) || 0;
+    setVar(inc[1], String(inc[2] === '++' ? before + 1 : before - 1));
+    return before;                     /* post-incrémentation : renvoie l'ancienne valeur */
+  }
+  const pre = /^\s*(\+\+|--)\s*([A-Za-z_][A-Za-z0-9_]*)\s*$/.exec(s);
+  if(pre){
+    const after = (parseInt(getVar(pre[2]), 10) || 0) + (pre[1] === '++' ? 1 : -1);
+    setVar(pre[2], String(after));
+    return after;
+  }
+  const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*([+\-*\/%]?)=([^=].*)$/.exec(s);
+  if(m){
+    const v = arith(m[3]);
+    const cur = parseInt(getVar(m[1]), 10) || 0;
+    let r;
+    switch(m[2]){
+      case '+': r = cur + v; break;
+      case '-': r = cur - v; break;
+      case '*': r = cur * v; break;
+      case '/': r = v === 0 ? 0 : Math.trunc(cur / v); break;
+      case '%': r = v === 0 ? 0 : cur % v; break;
+      default:  r = v;
+    }
+    setVar(m[1], String(r));
+    return r;
+  }
   return orx();
 }
 
@@ -1502,6 +1557,31 @@ async function execNode(node, ctx){
         return 0;
       } finally { await rd.finish(); }
     }
+    case 'arithcmd': {
+      const v = arith(node.expr);
+      return v === 0 ? 1 : 0;
+    }
+    case 'cfor': {
+      const rd = await applyRedirs(node.redirs, ctx);
+      if(rd.error){ ctx.err(rd.error + '\n'); return 1; }
+      let code = 0, guard = 0;
+      try{
+        if(node.init.trim()) arith(node.init);
+        for(;;){
+          if(++guard > 20000){ ctx.err('bash : boucle interrompue (limite de sécurité du simulateur)\n'); return 1; }
+          if(node.cond.trim() && arith(node.cond) === 0) break;
+          try{ code = await execNode(node.body, rd.ctx); }
+          catch(e){
+            if(e && e.flow === 'break'){ if(e.n > 1){ e.n--; throw e; } break; }
+            else if(e && e.flow === 'continue'){ if(e.n > 1){ e.n--; throw e; } }
+            else throw e;
+          }
+          if(node.step.trim()) arith(node.step);
+          if(state.exited) break;
+        }
+      } finally { await rd.finish(); }
+      return code;
+    }
     case 'for': {
       const rd = await applyRedirs(node.redirs, ctx);
       if(rd.error){ ctx.err(rd.error + '\n'); return 1; }
@@ -1587,7 +1667,11 @@ async function execSimple(node, ctx){
     return 0;
   }
   let argv = [];
-  for(const w of node.words) argv.push(...await expandWord(w, ctx));
+  /* dans [[ ... ]] les jokers servent de motif de comparaison, pas de
+     développement de noms de fichiers */
+  const firstLiteral = node.words[0] ? node.words[0].map(p => p.s).join('') : '';
+  const keepGlobs = (firstLiteral === '[[');
+  for(const w of node.words) argv.push(...await expandWord(w, ctx, {noGlob:keepGlobs}));
   if(!argv.length) return 0;
 
   /* alias */
@@ -1640,12 +1724,13 @@ async function dispatch(argv, ctx){
   if(state.funcs[name]){
     const savedPos = positional;
     positional = args;
+    funcDepth++;
     try{
       return await execNode(state.funcs[name], ctx);
     }catch(e){
       if(e && e.flow === 'return') return e.code;
       throw e;
-    }finally{ positional = savedPos; }
+    }finally{ positional = savedPos; funcDepth--; }
   }
   /* script ou binaire par chemin */
   if(name.includes('/')){
@@ -1676,6 +1761,7 @@ async function runScriptFile(path, args, ctx){
 async function runScriptSource(src, args, ctx){
   const savedPos = positional;
   positional = args;
+  funcDepth++;
   try{
     const ast = parse(src);
     const code = await execNode(ast, {stdin:ctx.stdin, out:ctx.out, err:ctx.err, depth:(ctx.depth||0)+1});
@@ -1685,7 +1771,7 @@ async function runScriptSource(src, args, ctx){
     if(e && e.flow === 'return') return e.code;
     ctx.err('bash : ' + (e && e.message ? e.message : String(e)) + '\n');
     return 2;
-  }finally{ positional = savedPos; }
+  }finally{ positional = savedPos; funcDepth--; }
 }
 
 /* =====================================================================
@@ -1700,6 +1786,9 @@ function getopt(args, spec){
   const known = spec.known == null ? null : spec.known;
   const longs = spec.longs || [];
   const opts = {}, rest = [];
+  /* en cas d'erreur on renvoie tout de même opts et rest vides :
+     un appelant qui oublie de tester g.error ne provoque plus d'exception */
+  const fail = (msg) => ({error:msg, opts:{}, rest:[]});
   let noMore = false;
   for(let i=0;i<args.length;i++){
     const a = args[i];
@@ -1708,17 +1797,21 @@ function getopt(args, spec){
     if(a.length > 2 && a.startsWith('--')){
       const eq = a.indexOf('=');
       const nm = eq < 0 ? a.slice(2) : a.slice(2, eq);
-      if(longs.length && !longs.includes(nm)) return {error:`option non reconnue « --${nm} »`};
+      if(!longs.includes(nm)) return fail(`option non reconnue « --${nm} »`);
       opts['--'+nm] = eq < 0 ? true : a.slice(eq+1);
       continue;
     }
-    if(a.length > 1 && a[0] === '-' && !/^-\d+$/.test(a)){
+    /* « -1 » est une option si le chiffre figure dans les options connues
+       (ls -1), sinon c'est un opérande ou un nombre négatif */
+    const numeric = /^-\d+$/.test(a);
+    const digitsAreOptions = numeric && known !== null && a.slice(1).split('').every(c => known.includes(c));
+    if(a.length > 1 && a[0] === '-' && (!numeric || digitsAreOptions)){
       for(let k=1;k<a.length;k++){
         const c = a[k];
-        if(known && !known.includes(c)) return {error:`option non valide -- « ${c} »`};
+        if(known && !known.includes(c)) return fail(`option non valide -- « ${c} »`);
         if(val.includes(c)){
           const v = a.slice(k+1) || args[++i];
-          if(v === undefined) return {error:`l'option requiert un argument -- « ${c} »`};
+          if(v === undefined) return fail(`l'option requiert un argument -- « ${c} »`);
           opts[c] = v; k = a.length; break;
         }
         opts[c] = true;
@@ -1785,7 +1878,7 @@ Liste le contenu des dossiers.
 let inodeSeq = 1000;
 function inodeOf(n){ if(!n._ino) n._ino = ++inodeSeq; return n._ino; }
 CMDS.ls = async (ctx, args) => {
-  const g = getopt(args, {known:'aAlhRtSr1dFi'});
+  const g = getopt(args, {known:'aAlhRtSr1dFiC', longs:['all','almost-all','color','human-readable','reverse','recursive','classify','inode','size','help']});
   if(g.error) return usageErr(ctx, 'ls', g.error);
   const o = g.opts;
   const targets = g.rest.length ? g.rest : ['.'];
@@ -1905,7 +1998,7 @@ CMDS.mkdir = async (ctx, args) => {
           continue;
         }
         if(!canWrite(node)){ ctx.err(`mkdir: impossible de créer le répertoire « ${cur} »: Permission non accordée\n`); code = 1; break; }
-        const nn = dnode(0o755, state.user, state.user);
+        const nn = dnode(0o777 & ~(state.umask || 0), state.user, state.user);
         node.children[s] = nn; node = nn;
         if(o.v || o['--verbose']) ctx.out(`mkdir: création du répertoire '${cur}'\n`);
       }
@@ -1915,7 +2008,7 @@ CMDS.mkdir = async (ctx, args) => {
     const par = lookup(dirnameOf(target));
     if(par.err || par.node.type !== 'dir'){ ctx.err(`mkdir: impossible de créer le répertoire « ${t} »: Aucun fichier ou dossier de ce type\n`); code = 1; continue; }
     if(!canWrite(par.node)){ ctx.err(`mkdir: impossible de créer le répertoire « ${t} »: Permission non accordée\n`); code = 1; continue; }
-    par.node.children[basenameOf(target)] = dnode(0o755, state.user, state.user);
+    par.node.children[basenameOf(target)] = dnode(0o777 & ~(state.umask || 0), state.user, state.user);
     if(o.v || o['--verbose']) ctx.out(`mkdir: création du répertoire '${t}'\n`);
   }
   return code;
@@ -1959,7 +2052,7 @@ CMDS.touch = async (ctx, args) => {
     const par = lookup(dirnameOf(t));
     if(par.err || par.node.type !== 'dir'){ ctx.err(`touch: impossible de faire un touch sur '${t}': Aucun fichier ou dossier de ce type\n`); code = 1; continue; }
     if(!canWrite(par.node)){ ctx.err(`touch: impossible de faire un touch sur '${t}': Permission non accordée\n`); code = 1; continue; }
-    const n = fnode('', 0o644, state.user, state.user);
+    const n = fnode('', 0o666 & ~(state.umask || 0), state.user, state.user);
     n.mtime = isNaN(when) ? now() : when;
     par.node.children[basenameOf(t)] = n;
   }
@@ -2960,9 +3053,20 @@ CMDS.tar = async (ctx, args) => {
   const archive = o.f;
   if(o.c){
     const entries = [];
+    let code = 0;
+    const archivePath = absPath(archive);       /* -f est relatif au dossier de départ */
+    const savedCwd = state.cwd;
+    if(o.C){
+      const d = lookup(o.C);
+      if(d.err || d.node.type !== 'dir'){
+        ctx.err(`tar: ${o.C} : Impossible de changer de répertoire : Aucun fichier ou dossier de ce type\ntar: Erreur fatale, arrêt immédiat\n`);
+        return 2;
+      }
+      state.cwd = d.path;
+    }
     const walk = (p) => {
       const r = lookup(p);
-      if(r.err){ ctx.err(`tar: ${p}: Impossible d'ouvrir: Aucun fichier ou dossier de ce type\n`); return; }
+      if(r.err){ ctx.err(`tar: ${p}: Impossible d'ouvrir: Aucun fichier ou dossier de ce type\n`); code = 2; return; }
       const rel = p.replace(/^\//,'').replace(/^\.\//,'');
       if(r.node.type === 'dir'){
         entries.push({p:rel + '/', t:'d', m:r.node.mode, c:''});
@@ -2973,12 +3077,14 @@ CMDS.tar = async (ctx, args) => {
         if(o.v) ctx.out(rel + '\n');
       }
     };
-    for(const p of g.rest) walk(p);
+    try{ for(const p of g.rest) walk(p); }
+    finally{ state.cwd = savedCwd; }
     const blob = 'TARSIM1\n' + JSON.stringify(entries);
-    const w = writeFile(archive, blob, false);
+    const w = writeFile(archivePath, blob, false);
     if(w.err){ ctx.err(`tar: ${archive}: ${w.err}\n`); return 2; }
     if(w.node){ w.node.tar = true; if(o.z) w.node.gz = true; }
-    return 0;
+    if(code) ctx.err("tar: Arrêt avec code d'erreur à cause des erreurs précédentes\n");
+    return code;
   }
   const rf = readFile(archive);
   if(rf.err){ ctx.err(`tar: ${archive}: Impossible d'ouvrir: Aucun fichier ou dossier de ce type\ntar: Erreur fatale, arrêt immédiat\n`); return 2; }
@@ -3349,6 +3455,7 @@ CMDS.kill = async (ctx, args) => {
 };
 CMDS.pkill = async (ctx, args) => {
   const g = getopt(args, {known:'lafu9', value:'u'});
+  if(g.error) return usageErr(ctx, 'pkill', g.error);
   const pat = g.rest[0];
   if(!pat) return usageErr(ctx, 'pkill', 'motif manquant');
   const re = new RegExp(pat);
@@ -3532,10 +3639,27 @@ CMDS.chgrp = async (ctx, args) => {
   return code;
 };
 
-HELP.umask = "umask [MASQUE] — affiche ou définit le masque de création de fichiers.";
+HELP.umask = "umask [-S] [MASQUE] — affiche ou définit le masque de création de fichiers.\n  Le masque retire des droits aux fichiers créés ensuite :\n  fichiers 666 et dossiers 777, moins le masque.\n  -S  affichage symbolique (u=rwx,g=rx,o=rx)";
 CMDS.umask = async (ctx, args) => {
-  if(!args.length){ ctx.out('0022\n'); return 0; }
-  return 0;
+  const g = getopt(args, {known:'Sp', longs:['help']});
+  if(g.error) return usageErr(ctx, 'umask', g.error);
+  if(!g.rest.length){
+    if(g.opts.S){
+      const parts = [];
+      for(const [who, sh] of [['u',6],['g',3],['o',0]]){
+        const b = 7 & ~((state.umask >> sh) & 7);
+        parts.push(who + '=' + (b&4?'r':'') + (b&2?'w':'') + (b&1?'x':''));
+      }
+      ctx.out(parts.join(',') + '\n');
+    } else {
+      ctx.out((g.opts.p ? 'umask ' : '') + (state.umask & 0o777).toString(8).padStart(4,'0') + '\n');
+    }
+    return 0;
+  }
+  const spec = g.rest[0];
+  if(/^[0-7]{1,4}$/.test(spec)){ state.umask = parseInt(spec, 8) & 0o777; return 0; }
+  ctx.err(`bash: umask: ${spec} : nombre octal non valable\n`);
+  return 1;
 };
 
 /* ---------------- sudo / su ---------------- */
@@ -3546,18 +3670,38 @@ HELP.sudo = `sudo COMMANDE — exécute une commande en tant que superutilisateu
 Dans ce simulateur, l'utilisateur « user » appartient au groupe sudo.`;
 CMDS.sudo = async (ctx, args) => {
   if(!args.length) return usageErr(ctx, 'sudo', 'commande manquante');
-  const g = getopt(args, {known:'ulkis', value:'u'});
-  if(args[0] === '-l'){
-    ctx.out(`Entrées par défaut pour user sur ${state.host} :\n    env_reset, mail_badpass\n\nL'utilisateur user peut utiliser les commandes suivantes sur ${state.host} :\n    (ALL : ALL) ALL\n`);
+  /* sudo n'interprète que ses propres options : l'analyse s'arrête au premier
+     argument qui n'en est pas une, tout le reste appartient à la commande appelée.
+     Sans cela, « sudo apt install -y » verrait -y comme une option de sudo. */
+  let i = 0, target = 'root', listOnly = false, forget = false, shellFlag = false;
+  while(i < args.length){
+    const a = args[i];
+    if(a === '--'){ i++; break; }
+    if(a === '-' || a[0] !== '-') break;
+    if(a === '-u' || a === '--user'){
+      if(args[i+1] === undefined) return usageErr(ctx, 'sudo', "l'option requiert un argument -- « u »");
+      target = args[i+1]; i += 2; continue;
+    }
+    if(a.startsWith('-u') && a.length > 2){ target = a.slice(2); i++; continue; }
+    if(a === '-l' || a === '--list'){ listOnly = true; i++; continue; }
+    if(a === '-k' || a === '-K'){ forget = true; i++; continue; }
+    if(a === '-i' || a === '-s'){ shellFlag = true; i++; continue; }
+    if(/^-[HEnSbvA]+$/.test(a)){ i++; continue; }
+    ctx.err(`sudo : option non valable -- « ${a.replace(/^-+/,'')} »\nusage : sudo [-u UTILISATEUR] COMMANDE [ARGUMENT]...\n`);
+    return 1;
+  }
+  const rest = args.slice(i);
+  if(forget){ state.sudoUntil = 0; if(!rest.length) return 0; }
+  if(listOnly){
+    ctx.out(`Entrées par défaut pour ${state.loginUser} sur ${state.host} :\n    env_reset, mail_badpass\n\nL'utilisateur ${state.loginUser} peut utiliser les commandes suivantes sur ${state.host} :\n    (ALL : ALL) ALL\n`);
     return 0;
   }
-  if(args[0] === '-k'){ state.sudoUntil = 0; return 0; }
   if(!USERS[state.loginUser].groups.includes('sudo')){
     ctx.err(`${state.loginUser} n'apparaît pas dans le fichier sudoers. Cet incident sera rapporté.\n`);
     return 1;
   }
-  const target = g.opts.u || 'root';
   if(!USERS[target]){ ctx.err(`sudo: utilisateur inconnu : ${target}\n`); return 1; }
+  if(!rest.length && !shellFlag) return usageErr(ctx, 'sudo', 'commande manquante');
   /* authentification simulée, mémorisée quelques minutes */
   if(Date.now() > state.sudoUntil && state.io.ask){
     if(!state.sudoUntil){
@@ -3566,7 +3710,12 @@ CMDS.sudo = async (ctx, args) => {
     await state.io.ask(`[sudo] Mot de passe de ${state.loginUser} : `, {password:true});
   }
   state.sudoUntil = Date.now() + 15*60*1000;
-  const rest = args.slice(args.indexOf(g.rest[0]));
+  if(!rest.length && shellFlag){
+    state.user = target; state.loginUser = target;
+    state.env.USER = target; state.env.LOGNAME = target; state.env.HOME = USERS[target].home;
+    state.cwd = USERS[target].home; state.env.PWD = state.cwd;
+    return 0;
+  }
   const saved = state.user;
   state.user = target;
   let code;
@@ -3643,7 +3792,8 @@ nvme0n1     259:0    0 476,9G  0 disk
 
 HELP.mount = "mount [PÉRIPHÉRIQUE POINT] — affiche ou effectue les montages (montage réservé à root).";
 CMDS.mount = async (ctx, args) => {
-  const g = getopt(args, {known:'atovr', value:'to'});
+  const g = getopt(args, {known:'atovr', value:'to', longs:['help']});
+  if(g.error) return usageErr(ctx, 'mount', g.error);
   if(!g.rest.length){
     for(const m of state.mounts) ctx.out(`${m.dev} on ${m.point} type ${m.type} (${m.opts})\n`);
     return 0;
@@ -3920,7 +4070,12 @@ CMDS.journalctl = async (ctx, args) => {
   return 0;
 };
 
-HELP.crontab = "crontab -l|-e|-r — gère les tâches planifiées de l'utilisateur.\n  -l  liste   -e  édite   -r  supprime toutes les tâches";
+HELP.crontab = `crontab [-l|-e|-r] [FICHIER]
+Gère les tâches planifiées de l'utilisateur.
+  -l  liste les tâches        -e  ouvre l'éditeur
+  -r  supprime tout           FICHIER  installe le contenu d'un fichier
+  -   installe ce qui arrive sur l'entrée standard
+Exemple : echo "0 3 * * * /home/user/sauvegarde.sh" | crontab -`;
 CMDS.crontab = async (ctx, args) => {
   const g = getopt(args, {known:'lreu', value:'u'});
   if(g.error) return usageErr(ctx, 'crontab', g.error);
@@ -3941,7 +4096,19 @@ CMDS.crontab = async (ctx, args) => {
     } else ctx.out('crontab: éditeur indisponible dans ce contexte\n');
     return 0;
   }
-  return usageErr(ctx, 'crontab', 'utilisez -l, -e ou -r');
+  const src = g.rest[0];
+  if(src){
+    let data;
+    if(src === '-') data = ctx.stdin || '';
+    else {
+      const r = readFile(src);
+      if(r.err){ ctx.err(`crontab: ${src}: Aucun fichier ou dossier de ce type\n`); return 1; }
+      data = r.content;
+    }
+    state.cron = lines(data).filter(l => l.trim() && !l.trim().startsWith('#'));
+    return 0;
+  }
+  return usageErr(ctx, 'crontab', 'utilisez -l, -e, -r, un nom de fichier, ou « - » pour lire l\'entrée standard');
 };
 
 /* ---------------- réseau ---------------- */
@@ -4060,26 +4227,52 @@ CMDS.curl = async (ctx, args) => {
   ctx.out(body);
   return 0;
 };
-HELP.wget = "wget URL — télécharge un fichier depuis une URL (réseau simulé).";
+HELP.wget = `wget [OPTIONS] URL — télécharge un fichier (réseau simulé).
+  -O FICHIER  enregistre sous ce nom          -q  mode silencieux
+Sans -O, le nom est déduit de l'URL ; si l'URL ne désigne aucun fichier,
+le contenu est enregistré dans index.html, comme le fait wget.`;
 CMDS.wget = async (ctx, args) => {
-  const url = args.find(a=>!a.startsWith('-'));
+  const g = getopt(args, {known:'OqcvnPt', value:'OPt', longs:['output-document','quiet','help']});
+  if(g.error) return usageErr(ctx, 'wget', g.error);
+  const url = g.rest[0];
   if(!url) return usageErr(ctx, 'wget', 'URL manquante');
+  const quiet = g.opts.q || g.opts['--quiet'];
+  const say = (t) => { if(!quiet) ctx.out(t); };
   const key = url.replace(/\/$/,'');
   const fn = WEB[url] || WEB[key] || WEB[key+'/'];
   const host = (url.match(/^https?:\/\/([^\/]+)/) || [])[1] || url;
-  ctx.out(`--${now().toISOString().replace('T',' ').slice(0,19)}--  ${url}\nRésolution de ${host}... `);
-  if(!fn){ ctx.out('échec : Nom ou service inconnu.\nwget: impossible de résoudre l\'adresse « ' + host + ' »\n'); return 4; }
+  say(`--${now().toISOString().replace('T',' ').slice(0,19)}--  ${url}\nRésolution de ${host}... `);
+  if(!fn){
+    say('échec : Nom ou service inconnu.\n');
+    ctx.err(`wget: impossible de résoudre l'adresse « ${host} »\n`);
+    return 4;
+  }
   const body = fn();
-  if(body === null){ ctx.out('192.168.1.42\nConnexion à ' + host + '|127.0.0.1|:80... échec : Connexion refusée.\n'); return 4; }
-  const name = basenameOf(url) || 'index.html';
-  writeFile(name, body, false);
-  ctx.out(`127.0.0.1\nConnexion à ${host}|127.0.0.1|:80... connecté.\nrequête HTTP transmise, en attente de la réponse... 200 OK\nTaille : ${bytelen(body)} [text/html]\nSauvegarde en : « ${name} »\n\n${name}    100%[==================>]  ${bytelen(body)}  --.-KB/s    ds 0s\n\n${now().toISOString().slice(0,19).replace('T',' ')} (${bytelen(body)} B/s) — « ${name} » sauvegardé [${bytelen(body)}]\n\n`);
+  if(body === null){
+    say(`127.0.0.1\nConnexion à ${host}|127.0.0.1|:80... échec : Connexion refusée.\n`);
+    return 4;
+  }
+  let name = g.opts.O || g.opts['--output-document'];
+  if(!name){
+    const path = url.replace(/^https?:\/\/[^\/]*/, '');
+    name = path.replace(/\/+$/,'').split('/').pop();
+    if(!name) name = 'index.html';
+  }
+  if(name === '-'){ ctx.out(body); return 0; }
+  const w = writeFile(name, body, false);
+  if(w.err){ ctx.err(`wget: ${name}: ${w.err.replace(/^.*?: /,'')}\n`); return 3; }
+  say(`127.0.0.1\nConnexion à ${host}|127.0.0.1|:80... connecté.\nrequête HTTP transmise, en attente de la réponse... 200 OK\nTaille : ${bytelen(body)} [text/html]\nSauvegarde en : « ${name} »\n\n${name}    100%[==================>]  ${bytelen(body)}  --.-KB/s    ds 0s\n\n${now().toISOString().slice(0,19).replace('T',' ')} (${bytelen(body)} B/s) — « ${name} » sauvegardé [${bytelen(body)}]\n\n`);
   return 0;
 };
 
 HELP.ssh = "ssh [UTILISATEUR@]HÔTE — ouvre une session distante (réseau simulé).\n  -p PORT  port distant   -i CLÉ  clé privée à utiliser";
 CMDS.ssh = async (ctx, args) => {
-  const g = getopt(args, {known:'pilvXYN', value:'pil'});
+  if(args.includes('-V') || args.includes('--version')){
+    ctx.err('OpenSSH_10.0p1 Ubuntu-2ubuntu1, OpenSSL 3.5.0 8 Apr 2025\n');
+    return 0;
+  }
+  const g = getopt(args, {known:'pilvXYNqTt46AC', value:'pil', longs:['version','help']});
+  if(g.error) return usageErr(ctx, 'ssh', g.error);
   const target = g.rest[0];
   if(!target) { ctx.err('usage: ssh [utilisateur@]hôte\n'); return 255; }
   const m = /^(?:([^@]+)@)?(.+)$/.exec(target);
@@ -4165,6 +4358,7 @@ The key's randomart image is:
 HELP.scp = "scp SOURCE DESTINATION — copie des fichiers via SSH (réseau simulé).";
 CMDS.scp = async (ctx, args) => {
   const g = getopt(args, {known:'rpqvPi', value:'Pi'});
+  if(g.error) return usageErr(ctx, 'scp', g.error);
   if(g.rest.length < 2) { ctx.err('usage: scp [-r] source ... cible\n'); return 1; }
   const src = g.rest[0], dst = g.rest[1];
   const remote = [src, dst].find(x => x.includes(':'));
@@ -4719,10 +4913,21 @@ CMDS.set = async (ctx, args) => {
   for(const k of Object.keys(state.funcs)) ctx.out(`${k} ()\n{\n    ...\n}\n`);
   return 0;
 };
-HELP.declare = "declare [-x] [NOM=VALEUR] — déclare une variable.";
+HELP.declare = "declare [-p] [-x] [NOM=VALEUR] — déclare une variable ou affiche sa déclaration.\n  -p  affiche la déclaration d'une variable   -x  exporte   -f  fonctions";
 CMDS.declare = async (ctx, args) => {
   const rest = args.filter(a=>!a.startsWith('-'));
-  if(args.includes('-x')) return CMDS.export(ctx, rest);
+  if(args.includes('-p')){
+    const names = rest.length ? rest : Object.keys(Object.assign({}, state.vars, state.env)).sort();
+    let code = 0;
+    for(const n of names){
+      if(Object.prototype.hasOwnProperty.call(state.env, n)) ctx.out(`declare -x ${n}="${state.env[n]}"\n`);
+      else if(Object.prototype.hasOwnProperty.call(state.vars, n)) ctx.out(`declare -- ${n}="${state.vars[n]}"\n`);
+      else if(state.funcs[n]) ctx.out(`${n} ()\n{\n    ...\n}\n`);
+      else { ctx.err(`bash: declare: ${n} : non trouvé\n`); code = 1; }
+    }
+    return code;
+  }
+  if(args.includes('-x') && rest.length) return CMDS.export(ctx, rest);
   if(args.includes('-f')){ for(const k of Object.keys(state.funcs)) ctx.out(`${k} ()\n{\n    ...\n}\n`); return 0; }
   if(!rest.length) return CMDS.set(ctx, []);
   for(const a of rest){ const eq = a.indexOf('='); if(eq > 0) setVar(a.slice(0,eq), a.slice(eq+1)); }
@@ -4765,6 +4970,7 @@ CMDS.source = async (ctx, args) => {
   if(!args.length){ ctx.err('bash: source: nom de fichier requis\n'); return 2; }
   const r = readFile(args[0]);
   if(r.err){ ctx.err(`bash: ${args[0]}: Aucun fichier ou dossier de ce type\n`); return 1; }
+  funcDepth++;                       /* « return » est permis dans un script sourcé */
   try{
     return await execNode(parse(r.content), ctx);
   }catch(e){
@@ -4772,7 +4978,7 @@ CMDS.source = async (ctx, args) => {
     if(e && e.flow) throw e;
     ctx.err('bash: ' + e.message + '\n');
     return 2;
-  }
+  }finally{ funcDepth--; }
 };
 CMDS['.'] = CMDS.source;
 HELP['.'] = HELP.source;
@@ -4804,7 +5010,11 @@ HELP.test = `test EXPRESSION  (ou [ EXPRESSION ])
   Chaînes  : -z vide, -n non vide, = égales, != différentes
   Nombres  : -eq -ne -lt -le -gt -ge
   Logique  : ! négation, -a et, -o ou`;
-function testEval(args, ctx){
+function matchPattern(str, pat){
+  try{ return globToRegex(pat, new Array(pat.length).fill(false)).test(str); }
+  catch(e){ return str === pat; }
+}
+function testEval(args, ctx, patterns){
   const one = (a) => {
     const r = lookup(a, {noFollowLast:true});
     return r;
@@ -4834,8 +5044,8 @@ function testEval(args, ctx){
     if(t.length === 3){
       const [a, op, b] = t;
       switch(op){
-        case '=': case '==': return a === b;
-        case '!=': return a !== b;
+        case '=': case '==': return patterns ? matchPattern(a, b) : a === b;
+        case '!=': return patterns ? !matchPattern(a, b) : a !== b;
         case '<': return a < b;
         case '>': return a > b;
         case '=~': try{ return new RegExp(b).test(a); }catch(e){ return false; }
@@ -4874,7 +5084,7 @@ CMDS['['] = async (ctx, args) => {
 HELP['['] = HELP.test;
 CMDS['[['] = async (ctx, args) => {
   if(args[args.length-1] !== ']]'){ ctx.err('bash: [[ : « ]] » manquant\n'); return 2; }
-  return testEval(args.slice(0,-1), ctx) ? 0 : 1;
+  return testEval(args.slice(0,-1), ctx, true) ? 0 : 1;
 };
 HELP['[['] = HELP.test;
 CMDS.true = async () => 0;
@@ -4951,6 +5161,7 @@ CMDS.sleep = async (ctx, args) => {
 HELP.read = "read [-p INVITE] [VARIABLE] — lit une ligne depuis l'entrée et la stocke dans une variable.";
 CMDS.read = async (ctx, args) => {
   const g = getopt(args, {known:'prsn', value:'pn'});
+  if(g.error) return usageErr(ctx, 'read', g.error);
   const name = g.rest[0] || 'REPLY';
   if(ctx.stdin){
     const first = ctx.stdin.split('\n')[0];
@@ -5022,7 +5233,8 @@ CMDS.tree = async (ctx, args) => {
 
 HELP.diff = "diff FICHIER1 FICHIER2 — compare deux fichiers ligne à ligne.\n  -u  format unifié";
 CMDS.diff = async (ctx, args) => {
-  const g = getopt(args, {known:'uiwqrbN'});
+  const g = getopt(args, {known:'uiwqrbN', longs:['unified','brief','recursive','help']});
+  if(g.error) return usageErr(ctx, 'diff', g.error);
   if(g.rest.length < 2) return usageErr(ctx, 'diff', 'opérande manquant');
   const a = readFile(g.rest[0]), b = readFile(g.rest[1]);
   if(a.err){ ctx.err(`diff: ${g.rest[0]}: Aucun fichier ou dossier de ce type\n`); return 2; }
@@ -5111,6 +5323,8 @@ const CATEGORIES = [
   ['Développement',          ['git','docker','docker-compose','bash','sh','vim','vi','nano']],
   ['Archives',               ['tar','gzip','gunzip','zcat']],
   ['Shell',                  ['export','unset','env','printenv','set','declare','alias','unalias','history','source','test','[','expr','let','seq','basename','dirname','which','type','read','sleep','exit','clear','reset','man','help']],
+  ['Compléments et primitives', ['.',':','[[','true','false','logout','return','break','continue',
+                                 'realpath','watch','yes','cal','more','apropos','whatis','apt-cache','lsb-release']],
   ['Arrêt',                  ['shutdown','reboot','poweroff','halt']]
 ];
 HELP.help = "help — affiche la liste des commandes disponibles, classées par thème.";
@@ -5131,7 +5345,8 @@ CMDS.help = async (ctx, args) => {
   ctx.out(`
 Structures du shell : if/then/elif/else/fi, for/while/do/done, fonctions,
   pipes |, redirections > >> < 2> 2>&1, opérateurs && || ; &,
-  variables $VAR, substitution $(commande), jokers * ? [abc], code retour $?
+  variables $VAR, substitution $(commande), jokers * ? [abc], code retour $?,
+  calcul ((i++)) et boucle for ((i=0; i<5; i++))
 
 Aide détaillée : man <commande>   ou   <commande> --help
 Réinitialiser  : reset
@@ -5196,7 +5411,13 @@ CMDS.exit = async (ctx, args) => {
 };
 CMDS.logout = CMDS.exit;
 HELP.logout = HELP.exit;
-CMDS.return = async (ctx, args) => { throw Flow('return', args.length ? (parseInt(args[0],10)||0) : state.lastExit); };
+CMDS.return = async (ctx, args) => {
+  if(funcDepth === 0){
+    ctx.err("bash: return : « return » n'est possible que depuis une fonction ou un script sourcé\n");
+    return 1;
+  }
+  throw Flow('return', args.length ? (parseInt(args[0],10)||0) : state.lastExit);
+};
 HELP.return = "return [CODE] — sort d'une fonction en renvoyant un code.";
 CMDS.break = async (ctx, args) => { throw Flow('break', 0, args.length ? parseInt(args[0],10) : 1); };
 HELP.break = "break [N] — sort d'une boucle.";
@@ -5715,7 +5936,7 @@ function saveState(){
       localStorage.setItem(STORE_KEY, JSON.stringify(encode({
         v:3, root:s.root, cwd:s.cwd, user:s.user, loginUser:s.loginUser, host:s.host,
         env:s.env, vars:s.vars, aliases:s.aliases, history:s.history.slice(-200),
-        packages:s.packages, snaps:s.snaps, services:s.services, docker:s.docker, mounts:s.mounts,
+        packages:s.packages, snaps:s.snaps, services:s.services, docker:s.docker, mounts:s.mounts, umask:s.umask,
         net:s.net, cron:s.cron, gitRepos:s.gitRepos
       })));
     }catch(e){ storageOK = false; }
@@ -5734,6 +5955,7 @@ function loadState(){
     s.history = d.history || []; s.packages = d.packages; s.services = d.services;
     s.docker = d.docker; s.mounts = d.mounts; s.net = d.net; s.cron = d.cron || [];
     if(d.snaps) s.snaps = d.snaps;
+    if(typeof d.umask === 'number') s.umask = d.umask;
     s.gitRepos = d.gitRepos || {};
     return true;
   }catch(e){ storageOK = false; return false; }
@@ -5811,6 +6033,7 @@ async function submit(){
     askResolve = null; askPassword = false;
     write((wasPw ? '' : value) + '\n', 'echo-cmd');
     setLine('');
+    showInput(false);          /* la commande reprend la main */
     r(value);
     return;
   }
@@ -5851,7 +6074,13 @@ async function submit(){
 kb.addEventListener('keydown', (e) => {
   if(!powered) return;
 
-  if(e.key === 'Enter'){ e.preventDefault(); if(!busy) submit(); return; }
+  if(e.key === 'Enter'){
+    e.preventDefault();
+    /* pendant une question (rm -i, sudo, read...) la commande est encore en
+       cours d'exécution : busy vaut true, mais la réponse doit passer */
+    if(askResolve !== null || !busy) submit();
+    return;
+  }
 
   if(e.ctrlKey || e.metaKey){
     const k = e.key.toLowerCase();
