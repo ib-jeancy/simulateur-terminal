@@ -783,7 +783,134 @@ function buildSystem(){
   state.cron = [];
   state.jobs = [];
   state.gitRepos = {};
+  buildMail();
   state.aliases = { ll:'ls -alF', la:'ls -A', l:'ls -CF' };
+}
+
+/* ---------------------------------------------------------------------
+   Messagerie fictive : entièrement locale, aucune connexion réseau.
+   Quatre dossiers, quelques messages d'exercice, un compteur d'identifiants.
+   --------------------------------------------------------------------- */
+function buildMail(){
+  const addr = state.user + '@simulateur-linux';
+  const mkDate = (msBack) => new Date(Date.now() - msBack);
+  const DAY = 86400000, HOUR = 3600000;
+  state.mail = {
+    address: addr,
+    nextId: 1,
+    folders: {
+      reception: [],
+      envoyes: [],
+      brouillons: [],
+      corbeille: []
+    }
+  };
+  const add = (folder, msg) => {
+    msg.id = state.mail.nextId++;
+    if(msg.read === undefined) msg.read = false;
+    if(!msg.attachments) msg.attachments = [];
+    state.mail.folders[folder].push(msg);
+    return msg;
+  };
+  add('reception', {
+    from: 'formation@simulateur-linux',
+    to: addr,
+    subject: 'Bienvenue dans la messagerie du simulateur',
+    date: mkDate(3*DAY),
+    read: false,
+    body:
+`Bonjour,
+
+Cette messagerie est entièrement fictive : rien ne quitte votre navigateur,
+aucun véritable e-mail n'est envoyé ni reçu.
+
+Quelques commandes pour commencer :
+  mail                        ouvre la boîte de réception
+  mail 1                      lit le message numéro 1
+  d 1                         supprime le message 1 (depuis « mail »)
+  mail -s "Bonjour" ami@example.com   envoie un message
+
+Bonne exploration !
+L'équipe du simulateur`
+  });
+  add('reception', {
+    from: 'root@simulateur-linux',
+    to: addr,
+    subject: 'Rapport de sauvegarde quotidien',
+    date: mkDate(1*DAY + 2*HOUR),
+    read: false,
+    body:
+`Sauvegarde du $(date) terminée avec succès.
+
+  Dossiers traités : /home/user/exercices
+  Volume total     : 24 Kio
+  Code de retour   : 0
+
+-- cron`
+  });
+  add('reception', {
+    from: 'no-reply@example.com',
+    to: addr,
+    subject: 'Votre facture du mois est disponible',
+    date: mkDate(6*HOUR),
+    read: true,
+    body:
+`Bonjour,
+
+Votre facture est disponible dans votre espace client.
+Ceci est un message d'exemple pour les exercices du livre.
+
+Cordialement,
+Le service de facturation (fictif)`
+  });
+  add('envoyes', {
+    from: addr,
+    to: 'collegue@example.com',
+    subject: 'Compte rendu de réunion',
+    date: mkDate(2*DAY),
+    read: true,
+    body:
+`Salut,
+
+Voici le compte rendu de la réunion d'hier. Rien de bloquant,
+on continue comme prévu.
+
+À bientôt.`
+  });
+  add('brouillons', {
+    from: addr,
+    to: 'famille@example.com',
+    subject: 'Nouvelles du week-end',
+    date: mkDate(12*HOUR),
+    read: true,
+    body:
+`Coucou,
+
+Je vous écrirai plus longuement bientôt. Message encore en cours
+de rédaction...`
+  });
+}
+
+/* Analyse d'une adresse : la partie locale et le domaine doivent être présents. */
+function validEmail(a){
+  return typeof a === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a);
+}
+const MAIL_DISCLAIMER = 'Message envoyé dans la messagerie simulée — aucun véritable e-mail n\'a été transmis.';
+
+function mailFolderName(key){
+  return {reception:'Réception', envoyes:'Envoyés', brouillons:'Brouillons', corbeille:'Corbeille'}[key] || key;
+}
+function mailDateShort(d){
+  const MOIS = ['jan','fév','mar','avr','mai','jun','jul','aoû','sep','oct','nov','déc'];
+  return MOIS[d.getMonth()] + ' ' + String(d.getDate()).padStart(2,' ') + ' ' +
+         String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function findMessage(id){
+  for(const key of Object.keys(state.mail.folders)){
+    const idx = state.mail.folders[key].findIndex(m => m.id === id);
+    if(idx >= 0) return {folder:key, index:idx, msg:state.mail.folders[key][idx]};
+  }
+  return null;
 }
 
 function resetAll(){
@@ -808,6 +935,7 @@ function resetAll(){
   state.bootTime = now();
   state.nextPid = 400;
   buildSystem();
+  buildMail();
 }
 
 /* =====================================================================
@@ -3713,6 +3841,361 @@ CMDS.date = async (ctx, args) => {
   ctx.out(d.toString().replace(/GMT.*$/,'CEST ' + d.getFullYear()) + '\n');
   return 0;
 };
+HELP.neomutt = `neomutt [OPTIONS] — client de messagerie en mode texte (fictif).
+Sans argument : ouvre l'interface plein écran (lecture, réponse, transfert, classement).
+  neomutt -s "Sujet" -- DEST                envoie un message
+  neomutt -s "Sujet" -a fichier -- DEST     avec une pièce jointe
+  neomutt -f envoyes                        ouvre un autre dossier
+Touches dans l'interface : ↑/↓ ou j/k déplacer · Entrée lire · r répondre ·
+f transférer · d supprimer · c changer de dossier · q quitter.
+Rien n'est transmis : tout reste dans le simulateur.`;
+CMDS.neomutt = async (ctx, args) => {
+  const g = getopt(args, {known:'safFHvpRy', value:'safF', longs:['subject','attach','help']});
+  if(g.error) return usageErr(ctx, 'neomutt', g.error);
+  const o = g.opts;
+  const M = state.mail;
+
+  /* Envoi en ligne de commande : neomutt -s "Sujet" [-a fichier] -- dest */
+  const hasSubject = o.s != null || o['--subject'] != null;
+  const recipients = g.rest.filter(a => a.includes('@'));
+  if(hasSubject || recipients.length){
+    if(!recipients.length){ ctx.err('neomutt : aucun destinataire (placez-le après « -- »)\n'); return 1; }
+    const attachments = [];
+    const specs = [];
+    if(o.a != null) specs.push(o.a);
+    if(o['--attach'] != null) specs.push(o['--attach']);
+    for(const spec of specs){
+      const rf = lookup(spec);
+      if(rf.err){ ctx.err(`Error: impossible de joindre ${spec}: Aucun fichier ou dossier de ce type\n`); return 1; }
+      if(rf.node.type === 'dir'){ ctx.err(`Error: ${spec}: est un dossier\n`); return 1; }
+      attachments.push({name:basenameOf(spec), size:nodeSize(rf.node)});
+    }
+    const subject = o.s || o['--subject'] || '(sans objet)';
+    let body = '';
+    if(ctx.stdin != null && ctx.stdin !== '') body = ctx.stdin.replace(/\n$/, '');
+    M.folders.envoyes.push({
+      id: M.nextId++, from: M.address, to: recipients.join(', '), cc: '',
+      subject, date: new Date(), read: true, body, attachments
+    });
+    let out = `${MAIL_DISCLAIMER}\n`;
+    out += `  À       : ${recipients.join(', ')}\n`;
+    out += `  Objet   : ${subject}\n`;
+    if(attachments.length) out += `  Pièces  : ${attachments.map(a => `${a.name} (${humanSize(a.size)})`).join(', ')}\n`;
+    out += `  (copie conservée dans « Envoyés »)\n`;
+    ctx.out(out);
+    return 0;
+  }
+
+  /* Interface plein écran : nécessite le mode graphique du terminal */
+  if(!state.io.fullscreen){
+    ctx.out('neomutt : interface interactive indisponible dans ce contexte. Utilisez « mail ».\n');
+    return 0;
+  }
+
+  let folderKey = 'reception';
+  if(o.f != null || o['--file'] != null){
+    const raw = String(o.f != null ? o.f : o['--file']).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    folderKey = {reception:'reception', envoyes:'envoyes', brouillons:'brouillons', corbeille:'corbeille'}[raw] || 'reception';
+  }
+
+  const view = { mode:'index', folderKey, sel:0, scroll:0, status:'' };
+  const FOLDERS = ['reception', 'envoyes', 'brouillons', 'corbeille'];
+
+  const render = () => {
+    const folder = M.folders[view.folderKey];
+    const W = 78;
+    let s = '';
+    s += `  NeoMutt  ·  ${mailFolderName(view.folderKey)}  ·  ${folder.length} message${folder.length>1?'s':''}`;
+    s += '  '.repeat(2) + '(messagerie fictive)\n';
+    s += '─'.repeat(W) + '\n';
+
+    if(view.mode === 'index'){
+      if(!folder.length){
+        s += '\n   (dossier vide)\n';
+      } else {
+        folder.forEach((m, i) => {
+          const cursor = i === view.sel ? '▶' : ' ';
+          const flag = m.read ? ' ' : 'N';
+          const who = (view.folderKey === 'envoyes' || view.folderKey === 'brouillons') ? ('→ ' + m.to) : m.from;
+          const att = (m.attachments && m.attachments.length) ? '📎' : ' ';
+          s += `${cursor} ${flag} ${String(i+1).padStart(2)} ${who.slice(0,24).padEnd(25)} ${mailDateShort(m.date).padEnd(13)} ${att} ${m.subject}\n`;
+        });
+      }
+      s += '\n' + '─'.repeat(W) + '\n';
+      s += ' ↑/↓ déplacer · Entrée lire · r répondre · f transférer · d supprimer · c dossier · q quitter';
+      if(view.status) s += '\n ' + view.status;
+    } else if(view.mode === 'read'){
+      const m = folder[view.sel];
+      const lines = [];
+      lines.push(`De     : ${m.from}`);
+      lines.push(`À      : ${m.to}`);
+      if(m.cc) lines.push(`Copie  : ${m.cc}`);
+      lines.push(`Objet  : ${m.subject}`);
+      lines.push(`Date   : ${m.date.toString().slice(0,24)}`);
+      if(m.attachments && m.attachments.length)
+        lines.push(`Pièces : ${m.attachments.map(a => `${a.name} (${humanSize(a.size)})`).join(', ')}`);
+      lines.push('');
+      m.body.split('\n').forEach(l => lines.push(l));
+      const visible = lines.slice(view.scroll, view.scroll + 16);
+      s += visible.join('\n') + '\n';
+      s += '\n' + '─'.repeat(W) + '\n';
+      s += ' ↑/↓ défiler · r répondre · f transférer · d supprimer · i retour à la liste · q quitter';
+      if(view.status) s += '\n ' + view.status;
+    }
+    return s;
+  };
+
+  const onKey = (key, view2) => {
+    const folder = M.folders[view.folderKey];
+    view.status = '';
+    if(view.mode === 'index'){
+      if(key === 'ArrowDown' || key === 'j'){ if(view.sel < folder.length - 1) view.sel++; return true; }
+      if(key === 'ArrowUp' || key === 'k'){ if(view.sel > 0) view.sel--; return true; }
+      if(key === 'Enter' || key === 'l'){
+        if(!folder.length) return true;
+        folder[view.sel].read = true; view.mode = 'read'; view.scroll = 0; return true;
+      }
+      if(key === 'c'){
+        const cur = FOLDERS.indexOf(view.folderKey);
+        view.folderKey = FOLDERS[(cur + 1) % FOLDERS.length];
+        view.sel = 0; view.status = 'Dossier : ' + mailFolderName(view.folderKey); return true;
+      }
+      if(key === 'd'){
+        if(!folder.length) return true;
+        const m = folder.splice(view.sel, 1)[0];
+        if(view.folderKey !== 'corbeille') M.folders.corbeille.push(m);
+        view.status = view.folderKey === 'corbeille' ? 'Message supprimé définitivement.' : 'Message déplacé vers la corbeille.';
+        if(view.sel >= folder.length) view.sel = Math.max(0, folder.length - 1);
+        return true;
+      }
+      if(key === 'r' || key === 'f'){
+        if(!folder.length) return true;
+        const m = folder[view.sel];
+        const verb = key === 'r' ? 'Réponse' : 'Transfert';
+        const to = key === 'r' ? m.from : '(destinataire à préciser)';
+        M.folders.brouillons.push({
+          id: M.nextId++, from: M.address, to,
+          subject: (key === 'r' ? 'Re: ' : 'Tr: ') + m.subject.replace(/^(Re: |Tr: )/,''),
+          date: new Date(), read: true,
+          body: `\n\n----- Message d'origine -----\n${m.body}`,
+          attachments: key === 'f' ? (m.attachments || []).slice() : []
+        });
+        view.status = `${verb} enregistré dans « Brouillons » — ${MAIL_DISCLAIMER}`;
+        return true;
+      }
+    } else if(view.mode === 'read'){
+      const m = folder[view.sel];
+      const total = 6 + (m.body.split('\n').length);
+      if(key === 'ArrowDown' || key === 'j'){ if(view.scroll < total - 8) view.scroll++; return true; }
+      if(key === 'ArrowUp' || key === 'k'){ if(view.scroll > 0) view.scroll--; return true; }
+      if(key === 'i' || key === 'Escape' || key === 'h'){ view.mode = 'index'; return true; }
+      if(key === 'd'){
+        folder.splice(view.sel, 1);
+        if(view.folderKey !== 'corbeille') M.folders.corbeille.push(m);
+        view.mode = 'index';
+        if(view.sel >= folder.length) view.sel = Math.max(0, folder.length - 1);
+        view.status = 'Message supprimé.';
+        return true;
+      }
+      if(key === 'r' || key === 'f'){
+        const verb = key === 'r' ? 'Réponse' : 'Transfert';
+        M.folders.brouillons.push({
+          id: M.nextId++, from: M.address, to: key === 'r' ? m.from : '(destinataire à préciser)',
+          subject: (key === 'r' ? 'Re: ' : 'Tr: ') + m.subject.replace(/^(Re: |Tr: )/,''),
+          date: new Date(), read: true, body: `\n\n----- Message d'origine -----\n${m.body}`,
+          attachments: key === 'f' ? (m.attachments || []).slice() : []
+        });
+        view.mode = 'index';
+        view.status = `${verb} enregistré dans « Brouillons » — ${MAIL_DISCLAIMER}`;
+        return true;
+      }
+    }
+    return true;
+  };
+
+  await state.io.fullscreen(render, 'neomutt', onKey);
+  return 0;
+};
+CMDS.mutt = CMDS.neomutt;
+HELP.mutt = HELP.neomutt;
+
+HELP.mail = `mail [OPTIONS] [DESTINATAIRE...] — messagerie fictive locale.
+Sans destinataire : ouvre la boîte de réception.
+  mail                    liste les messages reçus
+  mail N                  lit le message numéro N
+  mail DESTINATAIRE       rédige un message (corps terminé par « . » seul sur une ligne)
+  mail -s "Sujet" DEST    précise le sujet
+  mail -f DOSSIER         ouvre un autre dossier : envoyes, brouillons, corbeille
+  echo "texte" | mail -s "Sujet" DEST   envoie le texte reçu sur l'entrée
+Options de rédaction : -s SUJET, -c COPIE, -b COPIE_CACHEE, -a FICHIER (pièce jointe).
+Rien n'est transmis : tout reste dans le simulateur.`;
+CMDS.mail = async (ctx, args) => {
+  const g = getopt(args, {known:'sfcbaHNv', value:'sfcba', longs:['subject','file','attach','help']});
+  if(g.error) return usageErr(ctx, 'mail', g.error);
+  const o = g.opts;
+  const M = state.mail;
+
+  /* ----- envoi : au moins un destinataire, ou un sujet, ou une entrée en tube ----- */
+  const recipients = g.rest.filter(a => !/^\d+$/.test(a));
+  const wantsSend = recipients.length > 0 || o.s != null || o['--subject'] != null;
+
+  if(wantsSend){
+    const subject = (o.s != null ? o.s : (o['--subject'] != null ? o['--subject'] : ''));
+    if(!recipients.length){ ctx.err('mail : aucun destinataire indiqué\n'); return 1; }
+    for(const r of recipients){
+      if(!validEmail(r) && !r.includes('@')){
+        ctx.err(`mail: adresse « ${r} » non valable : un destinataire doit contenir @\n`); return 1;
+      }
+    }
+    /* pièces jointes : chaque fichier doit exister */
+    const attachments = [];
+    const attachSpecs = [];
+    if(o.a != null) attachSpecs.push(o.a);
+    if(o['--attach'] != null) attachSpecs.push(o['--attach']);
+    for(const spec of attachSpecs){
+      const rf = lookup(spec);
+      if(rf.err){ ctx.err(`mail: ${spec}: pièce jointe introuvable\n`); return 1; }
+      if(rf.node.type === 'dir'){ ctx.err(`mail: ${spec}: est un dossier, impossible de le joindre\n`); return 1; }
+      attachments.push({name:basenameOf(spec), size:nodeSize(rf.node)});
+    }
+    /* corps : depuis l'entrée standard, sinon saisie interactive ligne par ligne */
+    let body;
+    let finalSubject = subject;
+    if(ctx.stdin != null && ctx.stdin !== ''){
+      body = ctx.stdin.replace(/\n$/, '');
+    } else if(state.io.ask){
+      if(o.s == null && o['--subject'] == null){
+        const s = await state.io.ask('Objet : ');
+        if(s != null && s.trim() !== '') finalSubject = s.trim();
+      }
+      ctx.out('(Saisissez votre message. Terminez par une ligne contenant uniquement « . »)\n');
+      const linesArr = [];
+      for(;;){
+        const line = await state.io.ask('');
+        if(line == null){ ctx.out('(rédaction annulée)\n'); return 1; }
+        if(line === '.') break;
+        linesArr.push(line);
+      }
+      body = linesArr.join('\n');
+    } else {
+      body = '';
+    }
+    const subj = (typeof finalSubject !== 'undefined' ? finalSubject : subject) || '(sans objet)';
+    const msg = {
+      id: M.nextId++,
+      from: M.address,
+      to: recipients.join(', '),
+      cc: o.c || o.b || '',
+      subject: subj,
+      date: new Date(),
+      read: true,
+      body: body,
+      attachments: attachments
+    };
+    M.folders.envoyes.push(msg);
+    let out = `${MAIL_DISCLAIMER}\n`;
+    out += `  À       : ${recipients.join(', ')}\n`;
+    out += `  Objet   : ${subj}\n`;
+    if(attachments.length) out += `  Pièces  : ${attachments.map(a => a.name).join(', ')}\n`;
+    out += `  (copie conservée dans le dossier « Envoyés »)\n`;
+    ctx.out(out);
+    return 0;
+  }
+
+  /* ----- lecture / liste : dossier choisi avec -f ----- */
+  let folderKey = 'reception';
+  if(o.f != null || o['--file'] != null){
+    const raw = (o.f != null ? o.f : o['--file']).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    const map = {reception:'reception', inbox:'reception', envoyes:'envoyes', sent:'envoyes',
+                 brouillons:'brouillons', drafts:'brouillons', corbeille:'corbeille', trash:'corbeille'};
+    if(!map[raw]){ ctx.err(`mail: dossier « ${o.f || o['--file']} » inconnu (reception, envoyes, brouillons, corbeille)\n`); return 1; }
+    folderKey = map[raw];
+  }
+  const folder = M.folders[folderKey];
+
+  /* mail N : lire un message précis */
+  const idArg = g.rest.find(a => /^\d+$/.test(a));
+  if(idArg){
+    const num = parseInt(idArg, 10);
+    const m = folder[num - 1];
+    if(!m){ ctx.err(`mail: le message ${num} n'existe pas dans « ${mailFolderName(folderKey)} »\n`); return 1; }
+    m.read = true;
+    let out = '';
+    out += `De     : ${m.from}\n`;
+    out += `À      : ${m.to}\n`;
+    if(m.cc) out += `Copie  : ${m.cc}\n`;
+    out += `Objet  : ${m.subject}\n`;
+    out += `Date   : ${m.date.toString().slice(0, 24)}\n`;
+    if(m.attachments && m.attachments.length)
+      out += `Pièces : ${m.attachments.map(a => `${a.name} (${humanSize(a.size)})`).join(', ')}\n`;
+    out += `\n${m.body}\n`;
+    ctx.out(out);
+    return 0;
+  }
+
+  /* liste du dossier */
+  if(!folder.length){
+    ctx.out(`Aucun message dans « ${mailFolderName(folderKey)} ».\n`);
+    return folderKey === 'reception' ? 1 : 0;
+  }
+  const nonlus = folder.filter(m => !m.read).length;
+  ctx.out(`Dossier « ${mailFolderName(folderKey)} » : ${folder.length} message${folder.length > 1 ? 's' : ''}` +
+          (nonlus ? `, ${nonlus} non lu${nonlus > 1 ? 's' : ''}` : '') + `\n`);
+  ctx.out('  N  ÉTAT  ' + 'EXPÉDITEUR'.padEnd(28) + 'DATE'.padEnd(14) + 'OBJET\n');
+  folder.forEach((m, i) => {
+    const flag = m.read ? '   ' : ' N ';
+    const who = (folderKey === 'envoyes' || folderKey === 'brouillons') ? m.to : m.from;
+    const clip = (folderKey === 'envoyes' || folderKey === 'brouillons') ? '→ ' : '  ';
+    ctx.out(
+      String(i + 1).padStart(3) + ' ' + flag + ' ' +
+      (clip + who).slice(0, 27).padEnd(28) +
+      mailDateShort(m.date).padEnd(14) +
+      m.subject + (m.attachments && m.attachments.length ? ' 📎' : '') + '\n'
+    );
+  });
+  ctx.out(`\nLire : mail N   ·   Supprimer : mail -d N   ·   Autre dossier : mail -f envoyes\n`);
+  return 0;
+};
+
+/* Suppression : « mail -d N » déplace vers la corbeille ; un second passage depuis
+   la corbeille supprime définitivement. Fourni séparément pour rester simple. */
+HELP.maildel = "mail -d N — déplace le message N vers la corbeille.";
+CMDS.mail._del = true;
+
+/* On enrichit mail pour gérer -d sans casser l'analyse précédente. */
+const _mailBase = CMDS.mail;
+CMDS.mail = async (ctx, args) => {
+  if(args.includes('-d') || args.includes('--delete')){
+    const rest = args.filter(a => a !== '-d' && a !== '--delete');
+    const fg = getopt(rest, {known:'f', value:'f'});
+    const folderKey = (() => {
+      if(fg.opts.f == null) return 'reception';
+      const raw = String(fg.opts.f).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+      return {reception:'reception', envoyes:'envoyes', brouillons:'brouillons', corbeille:'corbeille'}[raw] || 'reception';
+    })();
+    const nums = fg.rest.filter(a => /^\d+$/.test(a)).map(Number);
+    if(!nums.length){ ctx.err('mail: indiquez le numéro du message à supprimer, par exemple « mail -d 1 »\n'); return 1; }
+    const folder = state.mail.folders[folderKey];
+    let code = 0;
+    for(const num of nums.sort((a, b) => b - a)){
+      const m = folder[num - 1];
+      if(!m){ ctx.err(`mail: le message ${num} n'existe pas dans « ${mailFolderName(folderKey)} »\n`); code = 1; continue; }
+      folder.splice(num - 1, 1);
+      if(folderKey === 'corbeille'){
+        ctx.out(`Message ${num} supprimé définitivement.\n`);
+      } else {
+        state.mail.folders.corbeille.push(m);
+        ctx.out(`Message ${num} déplacé vers la corbeille.\n`);
+      }
+    }
+    return code;
+  }
+  return _mailBase(ctx, args);
+};
+CMDS.mailx = CMDS.mail;
+HELP.mailx = HELP.mail;
+CMDS.Mail = CMDS.mail;
+
 HELP.cal = "cal [MOIS [ANNÉE]] — affiche le calendrier d'un mois.\n  Sans argument, affiche le mois en cours. Exemple : cal 12 2026";
 CMDS.cal = async (ctx, args) => {
   const g = getopt(args, {known:'my13', longs:['help']});
@@ -5698,6 +6181,7 @@ const CATEGORIES = [
   ['Services et journaux',   ['systemctl','service','journalctl','crontab']],
   ['Paquets',                ['apt','apt-get','snap','dnf','yum','pacman']],
   ['Réseau',                 ['ip','ifconfig','ping','curl','wget','ssh','ssh-keygen','scp','sftp','ufw']],
+  ['Messagerie (fictive)',   ['mail','mailx','neomutt','mutt']],
   ['Développement',          ['git','docker','docker-compose','bash','sh','vim','vi','nano']],
   ['Archives',               ['tar','gzip','gunzip','zcat']],
   ['Shell',                  ['export','unset','env','printenv','set','declare','alias','unalias','history','source','test','[','expr','let','seq','basename','dirname','which','type','read','sleep','exit','clear','reset','man','help']],
@@ -6058,28 +6542,44 @@ SIM.state.io.follow = (file) => new Promise(resolve => {
   interrupt = () => { clearInterval(timer); interrupt = null; resolve(); };
 });
 
-SIM.state.io.fullscreen = (render, title) => new Promise(resolve => {
+SIM.state.io.fullscreen = (render, title, handler) => new Promise(resolve => {
   openOverlay('plein');
   overlay.innerHTML = '';
   const pre = document.createElement('pre');
   pre.className = 'ov-body';
   const foot = document.createElement('div');
   foot.className = 'ov-foot';
-  foot.textContent = 'q : quitter — mise à jour toutes les 2 secondes';
+  const interactive = typeof handler === 'function';
+  foot.textContent = interactive ? 'q : quitter' : 'q : quitter — mise à jour toutes les 2 secondes';
   overlay.append(pre, foot);
   const tick = () => { pre.textContent = render(); };
   tick();
-  const timer = setInterval(tick, 2000);
+  /* Le mode « top » se rafraîchit tout seul ; le mode interactif (neomutt)
+     ne se redessine qu'après une touche. */
+  const timer = interactive ? null : setInterval(tick, 2000);
   const onKey = (e) => {
-    if(e.key === 'q' || e.key === 'Q' || e.key === 'Escape' || (e.ctrlKey && e.key === 'c')){
+    if(e.key === 'q' || e.key === 'Q' || (e.ctrlKey && e.key === 'c') ||
+       (!interactive && e.key === 'Escape')){
       e.preventDefault();
-      clearInterval(timer);
+      if(timer) clearInterval(timer);
       document.removeEventListener('keydown', onKey, true);
       closeOverlay();
       resolve();
+      return;
+    }
+    if(interactive){
+      /* on ne détourne que les touches utiles, pour ne pas bloquer le navigateur */
+      const used = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter','Escape',
+                    'j','k','h','l','r','f','d','c','i','n','p'];
+      if(used.includes(e.key)){
+        e.preventDefault();
+        handler(e.key, null);
+        tick();
+      }
     }
   };
   document.addEventListener('keydown', onKey, true);
+  overlay.tabIndex = 0;
   overlay.focus();
 });
 
@@ -6381,7 +6881,7 @@ function writeStateNow(){
       localStorage.setItem(STORE_KEY, JSON.stringify(encode({
         v:3, root:s.root, cwd:s.cwd, user:s.user, loginUser:s.loginUser, host:s.host,
         env:s.env, vars:s.vars, aliases:s.aliases, history:s.history.slice(-200),
-        packages:s.packages, snaps:s.snaps, services:s.services, docker:s.docker, mounts:s.mounts, umask:s.umask,
+        packages:s.packages, snaps:s.snaps, services:s.services, docker:s.docker, mounts:s.mounts, umask:s.umask, mail:s.mail,
         net:s.net, cron:s.cron, gitRepos:s.gitRepos
       })));
     }catch(e){ storageOK = false; }
@@ -6408,6 +6908,7 @@ function loadState(){
     s.docker = d.docker; s.mounts = d.mounts; s.net = d.net; s.cron = d.cron || [];
     if(d.snaps) s.snaps = d.snaps;
     if(typeof d.umask === 'number') s.umask = d.umask;
+    if(d.mail) s.mail = d.mail;
     s.gitRepos = d.gitRepos || {};
     return true;
   }catch(e){ storageOK = false; return false; }
