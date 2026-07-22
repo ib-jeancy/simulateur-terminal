@@ -3920,24 +3920,32 @@ CMDS.neomutt = async (ctx, args) => {
     if(view.mode === 'compose'){
       s += `  NeoMutt · ${draft.kind === 'reponse' ? 'Réponse' : 'Transfert'} · rédaction (fictive)\n`;
       s += '─'.repeat(W) + '\n';
-      const cursorField = (name) => draft.field === name ? '▶ ' : '  ';
-      s += `${cursorField('to')}À      : ${draft.to || '(vide)'}\n`;
+      const cur = (name) => draft.field === name ? '▶ ' : '  ';
+      /* curseur visible « _ » sur le champ en cours de saisie */
+      const caretTo = draft.field === 'to' ? '_' : '';
+      s += `${cur('to')}À      : ${draft.to}${caretTo}\n`;
       s += `  Objet  : ${draft.subject}\n`;
       if(draft.attachments.length)
-        s += `  Pièces : ${draft.attachments.map(a => a.name).join(', ')}\n`;
+        s += `  Pièces : ${draft.attachments.map(a => `${a.name} (${mailSize(a.size)})`).join(', ')}\n`;
       s += '─'.repeat(W) + '\n';
-      s += cursorField('body') + 'Message :\n\n';
-      const shown = draft.bodyLines.length ? draft.bodyLines.join('\n') : '  (tapez votre texte)';
-      s += shown + '\n';
+      s += cur('body') + 'Message :\n\n';
+      if(draft.field === 'body'){
+        /* on montre le texte saisi avec un curseur en fin de ligne courante */
+        const lines = draft.bodyLines.length ? draft.bodyLines.slice() : [''];
+        lines[lines.length - 1] = lines[lines.length - 1] + '_';
+        s += lines.join('\n') + '\n';
+      } else {
+        s += (draft.bodyLines.length ? draft.bodyLines.join('\n') : '  (le message viendra ici)') + '\n';
+      }
       if(draft.quoted){
         s += '\n----- Message d\'origine -----\n';
         s += draft.quoted.split('\n').slice(0, 6).join('\n') + '\n';
       }
       s += '\n' + '─'.repeat(W) + '\n';
       if(draft.field === 'to')
-        s += ' Saisissez le destinataire, Entrée pour passer au message · Échap annule';
+        s += ' Saisissez le destinataire · Entrée : passer au message · Échap : annuler';
       else
-        s += ' Tapez le message · Entrée = nouvelle ligne · « . » seul = envoyer · Échap = annuler (brouillon)';
+        s += ' Entrée : nouvelle ligne · « . » seul puis Entrée, ou Ctrl+D : envoyer · Échap : brouillon';
       if(view.status) s += '\n ' + view.status;
       return s;
     }
@@ -4031,33 +4039,47 @@ CMDS.neomutt = async (ctx, args) => {
         view.status = `${verb} ${accord} dans « Brouillons » — message non envoyé.`;
         return;
       }
+
+      /* Envoi : « . » seul sur une ligne, ou Ctrl+D, à condition d'avoir un
+         destinataire valide. On garantit au moins une ligne de corps. */
+      const tryToSend = () => {
+        if(!draft.to.trim() || !draft.to.includes('@')){
+          draft.field = 'to';
+          view.status = 'Destinataire requis (avec @). Saisissez-le puis Entrée, ou Échap pour enregistrer un brouillon.';
+          return false;
+        }
+        sendDraft();
+        const dest = draft.to;
+        draft = null; view.mode = 'index';
+        view.status = `Message envoyé à ${dest} — ${MAIL_DISCLAIMER}`;
+        return true;
+      };
+
+      /* Ctrl+D : envoi explicite, quel que soit le champ courant. */
+      if(key === 'ctrl-d'){ tryToSend(); return; }
+
       if(draft.field === 'to'){
         if(key === 'Enter'){
           if(!draft.to.trim()){ view.status = 'Indiquez un destinataire (contenant @) avant de continuer.'; return; }
-          draft.field = 'body'; view.status = ''; return;
+          draft.field = 'body'; view.status = 'Rédigez le message. « . » seul sur une ligne (ou Ctrl+D) envoie.'; return;
         }
         if(key === 'Backspace'){ draft.to = draft.to.slice(0, -1); return; }
-        if(printable){ draft.to += printable; return; }
+        if(printable){ draft.to += printable; view.status = ''; return; }
         return;
       }
+
       /* field === 'body' */
       if(key === 'Enter'){
-        const last = draft.bodyLines[draft.bodyLines.length - 1];
-        if(last === '.'){
-          draft.bodyLines.pop();               // retire le point
-          if(!draft.to.trim() || !draft.to.includes('@')){
-            view.status = 'Destinataire manquant : impossible d\'envoyer (Échap enregistre un brouillon).';
-            draft.bodyLines.push('.');         // on remet pour ne pas perdre l'action
-            draft.bodyLines.pop();
-            return;
-          }
-          sendDraft();
-          const dest = draft.to;
-          draft = null; view.mode = 'index';
-          view.status = `Message envoyé à ${dest} — ${MAIL_DISCLAIMER}`;
+        const idx = draft.bodyLines.length - 1;
+        const last = idx >= 0 ? draft.bodyLines[idx] : '';
+        /* une ligne composée uniquement d'un point déclenche l'envoi */
+        if(last.trim() === '.'){
+          draft.bodyLines.pop();               // retire la ligne « . »
+          tryToSend();
           return;
         }
         draft.bodyLines.push('');
+        view.status = '';
         return;
       }
       if(key === 'Backspace'){
@@ -4070,6 +4092,7 @@ CMDS.neomutt = async (ctx, args) => {
       if(printable){
         if(!draft.bodyLines.length) draft.bodyLines.push('');
         draft.bodyLines[draft.bodyLines.length - 1] += printable;
+        view.status = '';
         return;
       }
       return;
@@ -6685,7 +6708,16 @@ SIM.state.io.fullscreen = (render, title, handler, canQuit) => new Promise(resol
     resolve();
   };
   const onKey = (e) => {
-    if(e.ctrlKey && e.key !== 'c') return;   // laisse passer les raccourcis navigateur
+    /* Ctrl+D en mode interactif : envoi explicite (transmis au handler). */
+    if(interactive && (e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')){
+      e.preventDefault();
+      if(e.stopPropagation) e.stopPropagation();
+      if(e.stopImmediatePropagation) e.stopImmediatePropagation();
+      handler('ctrl-d', null);
+      tick();
+      return;
+    }
+    if(e.ctrlKey && e.key !== 'c') return;   // laisse passer les autres raccourcis navigateur
     /* Sortie : « q » ou Ctrl+C, mais seulement si l'appli le permet
        (neomutt bloque la sortie pendant une rédaction, où « q » est un caractère). */
     const wantQuit = (e.key === 'q' || e.key === 'Q' || (e.ctrlKey && e.key === 'c') ||
