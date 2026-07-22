@@ -6702,6 +6702,8 @@ SIM.state.io.fullscreen = (render, title, handler, canQuit) => new Promise(resol
                      'Home','End','PageUp','PageDown'];
     if(control.includes(e.key)){
       e.preventDefault();
+      if(e.stopPropagation) e.stopPropagation();
+      if(e.stopImmediatePropagation) e.stopImmediatePropagation();
       handler(e.key, null);
       tick();
       return;
@@ -6710,12 +6712,15 @@ SIM.state.io.fullscreen = (render, title, handler, canQuit) => new Promise(resol
        raccourcis d'une seule lettre comme r, f, d, j, k). */
     if(e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey){
       e.preventDefault();
+      if(e.stopPropagation) e.stopPropagation();
+      if(e.stopImmediatePropagation) e.stopImmediatePropagation();
       handler(e.key, e.key);
       tick();
     }
   };
   document.addEventListener('keydown', onKey, true);
   overlay.tabIndex = 0;
+  kb.blur();
   overlay.focus();
 });
 
@@ -7162,6 +7167,9 @@ async function submit(){
 /* ---------------- clavier du terminal ---------------- */
 kb.addEventListener('keydown', (e) => {
   if(!powered) return;
+  /* Un overlay (pager, éditeur, neomutt, top) gère lui-même le clavier :
+     si kb a malgré tout le focus, on ne double pas le traitement. */
+  if(overlay.classList.contains('on')) return;
 
   if(e.key === 'Enter'){
     e.preventDefault();
