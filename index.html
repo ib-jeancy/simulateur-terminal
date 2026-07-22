@@ -7167,9 +7167,9 @@ async function submit(){
 /* ---------------- clavier du terminal ---------------- */
 kb.addEventListener('keydown', (e) => {
   if(!powered) return;
-  /* Un overlay (pager, éditeur, neomutt, top) gère lui-même le clavier :
-     si kb a malgré tout le focus, on ne double pas le traitement. */
-  if(overlay.classList.contains('on')) return;
+  /* Un overlay gère lui-même le clavier : si kb a malgré tout le focus,
+     on bloque tout ici pour que rien n'entre dans la ligne de commande. */
+  if(overlayActive){ e.preventDefault(); return; }
 
   if(e.key === 'Enter'){
     e.preventDefault();
@@ -7228,7 +7228,15 @@ kb.addEventListener('keydown', (e) => {
   }
   setTimeout(renderLine, 0);
 });
-kb.addEventListener('input', renderLine);
+kb.addEventListener('input', (e) => {
+  /* Si un overlay est ouvert, aucune frappe ne doit alimenter la ligne de
+     commande : on annule la saisie qui aurait pu passer. */
+  if(overlayActive){ kb.value = ''; return; }
+  renderLine();
+});
+kb.addEventListener('beforeinput', (e) => {
+  if(overlayActive && e.preventDefault) e.preventDefault();
+});
 kb.addEventListener('click', renderLine);
 kb.addEventListener('select', renderLine);
 kb.addEventListener('blur', () => curEl.classList.add('off'));
@@ -7239,15 +7247,26 @@ screenEl.addEventListener('mousedown', (e) => {
 });
 
 /* ---------------- barre d'outils ---------------- */
+let overlayActive = false;
 function openOverlay(kind){
   overlay.className = 'on ' + kind;
   overlay.setAttribute('aria-hidden', 'false');
+  overlayActive = true;
+  /* Neutralise complètement le champ de saisie : il ne doit plus rien
+     capter tant qu'un overlay (neomutt, pager, éditeur, top) est ouvert. */
+  kb.readOnly = true;
   kb.blur();
 }
 function closeOverlay(){
   overlay.className = '';
   overlay.innerHTML = '';
   overlay.setAttribute('aria-hidden', 'true');
+  overlayActive = false;
+  kb.readOnly = false;
+  /* la ligne de commande doit repartir vierge : aucune frappe faite pendant
+     l'overlay ne doit y subsister */
+  kb.value = '';
+  if(typeof renderLine === 'function') renderLine();
   focusKb();
 }
 $('btn-aide').addEventListener('click', () => { if(!busy){ setLine('help'); submit(); } });
